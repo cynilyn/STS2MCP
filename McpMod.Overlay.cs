@@ -12,7 +12,10 @@ using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Nodes.Events;
+using MegaCrit.Sts2.Core.Nodes.Events.Custom;
+using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
@@ -46,7 +49,7 @@ public class OverlayPanel
 
 public class OverlayPayload
 {
-    // combat | hand_select | card_reward | map | event | panel (panel only)
+    // combat | hand_select | card_reward | map | event | shop | panel (panel only)
     public string? Screen { get; set; }
     public List<OverlayItem>? Items { get; set; }
     public OverlayPanel? Panel { get; set; }
@@ -377,6 +380,19 @@ public static partial class McpMod
                         .Where(mp => mp.State == MapPointState.Travelable && mp.Point != null)
                         .OrderBy(mp => mp.Point!.coord.col)
                         .Select(mp => (Control?)mp));
+                break;
+            }
+            case "shop":
+            {
+                // shop_purchase index = MerchantInventory.AllEntries order; each slot node holds the same entry object.
+                NMerchantInventory? invUi = NMerchantRoom.Instance?.Inventory;
+                if (invUi == null && NEventRoom.Instance is { } evRoom)
+                    invUi = FindFirst<NFakeMerchant>(evRoom)?.Inventory;
+                if (invUi == null || !IsLiveNode(invUi) || invUi.Inventory == null)
+                    break;
+                var slots = invUi.GetAllSlots().Where(s => s != null && s.Entry != null).ToList();
+                foreach (var entry in invUi.Inventory.AllEntries)
+                    result.Add(slots.FirstOrDefault(s => ReferenceEquals(s.Entry, entry)));
                 break;
             }
             case "event":
