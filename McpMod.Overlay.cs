@@ -66,7 +66,6 @@ public static partial class McpMod
     private static Label? _ovPanelText;
     private static ProgressBar? _ovBar;
     private static Font? _ovFont;
-    private static bool _ovFontTried;
     private static List<Control?> _ovTargets = new();
     private static ulong _ovLastScan;
     private static string? _ovScanScreen;
@@ -102,6 +101,7 @@ public static partial class McpMod
         {
             if (!EnsureOverlayNodes())
                 return;
+            OverlayFont();
             var p = _overlay;
             if (p == null || p.Clear || (DateTime.UtcNow - _overlayAt).TotalSeconds > OverlayTtlSec)
             {
@@ -197,26 +197,70 @@ public static partial class McpMod
         return lbl;
     }
 
-    // Godot's built-in fallback font has no Hangul, and the game's label fonts are not reliably reachable;
-    // use the Windows Korean system font (Malgun Gothic) with generic fallbacks.
+    // Prefer the game's own font (it looks right), but only one that actually has Hangul: the first label found
+    // may use a Latin-only font. Until one is found (rescanned every 2 s), fall back to the Korean system font.
+    private static Font? _ovSysFont;
+    private static bool _ovGameFont;
+    private static ulong _ovFontScan;
+
     private static Font? OverlayFont()
     {
-        if (_ovFont != null || _ovFontTried)
+        if (_ovGameFont)
             return _ovFont;
-        _ovFontTried = true;
-        try
+        ulong now = Time.GetTicksMsec();
+        if (now - _ovFontScan > 2000 && Engine.GetMainLoop() is SceneTree tree && tree.Root != null)
         {
-            _ovFont = new SystemFont
+            _ovFontScan = now;
+            var game = FindGameHangulFont(tree.Root);
+            if (game != null)
             {
-                FontNames = new[] { "Malgun Gothic", "맑은 고딕", "Noto Sans CJK KR", "Noto Sans KR", "Apple SD Gothic Neo", "sans-serif" },
-                FontWeight = 600
-            };
+                _ovFont = game;
+                _ovGameFont = true;
+                ApplyOverlayFont(game);
+                return game;
+            }
         }
-        catch (Exception ex)
+        if (_ovSysFont == null)
         {
-            GD.PrintErr($"[STS2 MCP] overlay font: {ex.Message}");
+            try
+            {
+                _ovSysFont = new SystemFont
+                {
+                    FontNames = new[] { "Malgun Gothic", "맑은 고딕", "Noto Sans CJK KR", "Noto Sans KR", "sans-serif" },
+                    FontWeight = 600
+                };
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[STS2 MCP] overlay font: {ex.Message}");
+            }
         }
+        _ovFont ??= _ovSysFont;
         return _ovFont;
+    }
+
+    private static Font? FindGameHangulFont(Node root)
+    {
+        foreach (var rtl in FindAll<RichTextLabel>(root))
+        {
+            var f = rtl.GetThemeFont("normal_font");
+            if (f != null && f.HasChar(0xAC00) && f.HasChar(0xD55C))      // '가', '한'
+                return f;
+        }
+        foreach (var l in FindAll<Label>(root))
+        {
+            var f = l.GetThemeFont("font");
+            if (f != null && f.HasChar(0xAC00) && f.HasChar(0xD55C))
+                return f;
+        }
+        return null;
+    }
+
+    private static void ApplyOverlayFont(Font font)
+    {
+        foreach (var l in _ovLabels)
+            l.AddThemeFontOverride("font", font);
+        _ovPanelText?.AddThemeFontOverride("font", font);
     }
 
     private static Label OverlayLabel(int i)
