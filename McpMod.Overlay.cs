@@ -126,7 +126,7 @@ public static partial class McpMod
                 if (target == null || !IsNodeVisible(target))
                     continue;
                 var lbl = OverlayLabel(used++);
-                lbl.Text = (it.Chosen ? "★ " : "") + $"{it.Prob * 100:0}%" + (it.Rule ? " ⚖" : "");
+                lbl.Text = (it.Chosen ? "★ " : "") + $"{it.Prob * 100:0}%" + (it.Rule ? " 규칙" : "");
                 lbl.AddThemeColorOverride("font_color", it.Chosen ? OvChosen : it.Rule ? OvRule : OvPlain);
                 lbl.ResetSize();
                 var rect = target.GetGlobalRect();
@@ -197,19 +197,24 @@ public static partial class McpMod
         return lbl;
     }
 
-    // Godot's fallback font has no Hangul; borrow the game's own font from any rich text label in the scene.
+    // Godot's built-in fallback font has no Hangul, and the game's label fonts are not reliably reachable;
+    // use the Windows Korean system font (Malgun Gothic) with generic fallbacks.
     private static Font? OverlayFont()
     {
         if (_ovFont != null || _ovFontTried)
             return _ovFont;
-        if (Engine.GetMainLoop() is SceneTree tree && tree.Root != null)
+        _ovFontTried = true;
+        try
         {
-            var rtl = FindFirst<RichTextLabel>(tree.Root);
-            if (rtl != null)
+            _ovFont = new SystemFont
             {
-                _ovFont = rtl.GetThemeFont("normal_font");
-                _ovFontTried = true;
-            }
+                FontNames = new[] { "Malgun Gothic", "맑은 고딕", "Noto Sans CJK KR", "Noto Sans KR", "Apple SD Gothic Neo", "sans-serif" },
+                FontWeight = 600
+            };
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[STS2 MCP] overlay font: {ex.Message}");
         }
         return _ovFont;
     }
@@ -263,7 +268,7 @@ public static partial class McpMod
         _ovBar.Value = bar;
         _ovBar.Visible = panel.WinProb != null || panel.Value != null;
         foreach (var t in panel.Top ?? new List<OverlayItem>())
-            lines.Add((t.Chosen ? "★ " : "   ") + $"{t.Prob * 100,3:0}%  {t.Label}" + (t.Rule ? "  ⚖규칙" : ""));
+            lines.Add((t.Chosen ? "★ " : "   ") + $"{t.Prob * 100,3:0}%  {t.Label}" + (t.Rule ? "  [규칙]" : ""));
         if (!string.IsNullOrEmpty(panel.Note))
             lines.Add(panel.Note!);
         if (panel.Highlights is { Count: > 0 })
@@ -279,9 +284,9 @@ public static partial class McpMod
 
     private static string HighlightName(string h) => h switch
     {
-        "swing" => "⚡형세 급변",
-        "close_call" => "🤔고민한 수",
-        "disagree" => "⚖규칙과 다름",
+        "swing" => "[형세 급변]",
+        "close_call" => "[고민한 수]",
+        "disagree" => "[규칙과 다름]",
         _ => h
     };
 
