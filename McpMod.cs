@@ -88,6 +88,7 @@ public static partial class McpMod
             // Connect to main thread process frame for action execution
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(ProcessMainThreadQueue));
+            tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(OverlayTick));
 
             int port = LoadPort();
 
@@ -250,6 +251,13 @@ public static partial class McpMod
             {
                 if (request.HttpMethod == "GET")
                     HandleGetCompendium(response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
+            else if (path == "/api/v1/overlay")
+            {
+                if (request.HttpMethod == "POST")
+                    HandlePostOverlay(request, response);
                 else
                     SendError(response, 405, "Method not allowed");
             }
