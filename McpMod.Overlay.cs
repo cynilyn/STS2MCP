@@ -78,7 +78,7 @@ public static partial class McpMod
     private static void HandlePostOverlay(HttpListenerRequest request, HttpListenerResponse response)
     {
         string body;
-        using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+        using (var reader = new StreamReader(request.InputStream, System.Text.Encoding.UTF8))
             body = reader.ReadToEnd();
         OverlayPayload? p;
         try
