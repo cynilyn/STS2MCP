@@ -780,7 +780,7 @@ public static partial class McpMod
                 _ => lobby.NetService.Type.ToString().ToLowerInvariant()
             },
             ["game_mode"] = lobby.GameMode.ToString().ToLowerInvariant(),
-            ["max_players"] = lobby.MaxPlayers,
+            ["max_players"] = SafeMaxPlayers(lobby),
             ["ascension"] = lobby.Ascension,
             ["max_ascension"] = lobby.MaxAscension,
             ["all_ready"] = lobby.Players.Count > 0 && lobby.Players.All(p => p.isReady),
@@ -829,6 +829,19 @@ public static partial class McpMod
             lobbyState["seed"] = lobby.Seed;
 
         return lobbyState;
+    }
+
+    // STS2 v0.111 removed the public StartRunLobby.MaxPlayers; the value now only exists in a private field.
+    private static int SafeMaxPlayers(StartRunLobby lobby)
+    {
+        try
+        {
+            var field = typeof(StartRunLobby).GetField("_maxPlayers",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            if (field?.GetValue(lobby) is int n) return n;
+        }
+        catch { }
+        return lobby.Players.Count;
     }
 
     private static bool SafeIsAboutToBeginGame(StartRunLobby lobby)
@@ -970,7 +983,7 @@ public static partial class McpMod
             catch { }
 
             info["expected_player_count"] = lobby.Run?.Players?.Count ?? 0;
-            info["connected_player_count"] = lobby.ConnectedPlayerIds?.Count ?? 0;
+            info["connected_player_count"] = lobby.PlayerIds?.Count() ?? 0;
 
             // LoadRunLobby no longer exposes IsAboutToBeginGame in the public game API,
             // so derive the same readiness summary from connected players and ready flags.
@@ -979,7 +992,7 @@ public static partial class McpMod
             try
             {
                 var runPlayers = lobby.Run?.Players;
-                var connectedPlayerIds = lobby.ConnectedPlayerIds;
+                var connectedPlayerIds = lobby.PlayerIds;
                 aboutToBegin = runPlayers != null
                     && connectedPlayerIds != null
                     && runPlayers.Count > 0
@@ -997,7 +1010,7 @@ public static partial class McpMod
                 {
                     foreach (var sp in lobby.Run.Players)
                     {
-                        bool isConnected = lobby.ConnectedPlayerIds?.Contains(sp.NetId) ?? false;
+                        bool isConnected = lobby.PlayerIds?.Contains(sp.NetId) ?? false;
                         bool isReady = false;
                         try { isReady = lobby.IsPlayerReady(sp.NetId); } catch { }
                         players.Add(new Dictionary<string, object?>
