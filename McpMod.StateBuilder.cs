@@ -1868,6 +1868,38 @@ public static partial class McpMod
         // Next options - read travelable state from UI nodes
         var nextOptions = new List<Dictionary<string, object?>>();
         var mapScreen = NMapScreen.Instance;
+
+        // Choice order of sts2-cli MapSelectState (node Children enumeration, not column order), so a
+        // bot trained on the simulator can see candidates in the same order via `sim_order`.
+        var simOrder = new List<MapCoord>();
+        var currentCoord = runState.CurrentMapCoord;
+        if (currentCoord.HasValue)
+        {
+            var currentPoint = map.GetPoint(currentCoord.Value);
+            if (currentPoint == null)
+            {
+                // Stale coord: sts2-cli falls back to the starting point's children.
+                var sp = map.StartingMapPoint;
+                if (sp?.Children != null)
+                    foreach (var child in sp.Children)
+                        simOrder.Add(child.coord);
+            }
+            else
+            {
+                foreach (var child in currentPoint.Children ?? Enumerable.Empty<MapPoint>())
+                    simOrder.Add(child.coord);
+            }
+        }
+        else
+        {
+            // Starting point first, then its children (same as sts2-cli).
+            var startPoint = map.StartingMapPoint;
+            simOrder.Add(startPoint.coord);
+            if (startPoint.Children != null)
+                foreach (var child in startPoint.Children)
+                    simOrder.Add(child.coord);
+        }
+
         if (mapScreen != null)
         {
             var travelable = FindAll<NMapPoint>(mapScreen)
@@ -1886,6 +1918,8 @@ public static partial class McpMod
                     ["row"] = pt.coord.row,
                     ["type"] = pt.PointType.ToString()
                 };
+                int simIndex = simOrder.FindIndex(c => c.col == pt.coord.col && c.row == pt.coord.row);
+                option["sim_order"] = simIndex >= 0 ? simIndex : (int?)null;
 
                 // 1-level lookahead
                 var children = pt.Children

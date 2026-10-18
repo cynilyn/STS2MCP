@@ -506,6 +506,9 @@ Pick one card to add to your deck. Appears after claiming a card reward, or dire
         "index": 0,
         "col": 2, "row": 3,
         "type": "RestSite",
+        "sim_order": 1,          // Index of this node in sts2-cli's map_select `choices` (current node's Children
+                                 // enumeration order; with no current coord: [start, ...start.Children]).
+                                 // next_options itself stays sorted by column. null if not in that list.
         "leads_to": [            // 1-level lookahead (children)
           { "col": 1, "row": 4, "type": "Elite" },
           { "col": 3, "row": 4, "type": "Shop" }

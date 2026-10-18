@@ -52,6 +52,14 @@
 | `osty` {alive,hp,max_hp,block} | context | 모드는 `pets[]`(Osty)로 보냄, 어댑터는 `osty`만 복사 | **어댑터 불일치**: 네크로바인더 Osty 특징 전부 0 |
 | `min_select`/`max_select` (card_select) | 선택 마스크, player f[11] | hand_select에 없음 → 어댑터 추정 | 근사 |
 
+## 지도 선택(비전투 모델)
+
+| 시뮬레이터 필드 | 모드 | 상태 |
+|---|---|---|
+| `map_select.choices` 순서 = 현재 노드 `Children` 열거 순서(생성 순서). 현재 좌표가 없으면 `[시작 노드, 시작 노드의 Children...]`, 좌표가 무효면 시작 노드의 Children | `map.next_options`는 열(col) 순 정렬 | 실제 결정 258개 중 88개에서 순서가 다름 → 각 `next_options` 항목에 `sim_order`(이 브랜치) |
+
+`sim_order`는 그 노드가 sts2-cli `choices`에서 몇 번째인지(같은 분기 규칙으로 계산, 없으면 null). 봇은 `next_options`를 `sim_order`로 정렬해 쓰고, 명령은 기존 `index`로 보낸다. 시작 노드가 0번을 차지하는 경우 자식은 1부터 시작하므로 절대값이 아니라 정렬 키로 쓴다. `Children`은 `HashSet<MapPoint>`다. .NET HashSet의 열거 순서는 내부 항목 배열 순서(삽입 순서, 제거 뒤에는 빈 칸 재사용)라 해시값과 무관하고, 같은 시드·같은 DLL의 같은 추가/제거 과정이면 게임과 시뮬레이터 순서가 같다(실제 게임 대조는 아직 안 함).
+
 ## 결정에 영향이 큰 남은 차이 (우선순위)
 
 1. **디펙트 구체 수치 0(한국어면 종류도 0)** — 어댑터에서 `type = id.removesuffix("_ORB").title()`, `passive = int(passive_val)`, `evoke = int(evoke_val)`로 옮기면 해결(모드 수정 불필요). 디펙트 전투 내내 관측이 틀림.
@@ -77,6 +85,8 @@
 더미 카드(`draw_pile`/`discard_pile`/`exhaust_pile`): `id`, `is_upgraded`.
 
 적 의도(`battle.enemies[].intents[]`, `AttackIntent` 하위 전부: Attack·DeathBlow): `hits > 1`이면 `damage`(타당 `GetSingleDamage`)·`hits`(`Repeats`)·`total_damage`(`GetTotalDamage`), 아니면 `damage`(`GetTotalDamage`)만. 대상 목록은 sts2-cli처럼 `CombatManager.DebugOnlyGetState().PlayerCreatures`.
+
+지도(`map.next_options[]`): `sim_order`(int 또는 null) — 위 "지도 선택" 참고.
 
 파워(플레이어·적·Osty `status[]`): `raw_amount` = `PowerModel.Amount`(sts2-cli `amount`와 같은 값). 기존 `amount`(= `DisplayAmount`)는 그대로.
 
