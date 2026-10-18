@@ -302,7 +302,7 @@ public static partial class McpMod
 
         try
         {
-            var stateTask = RunOnMainThread(() => BuildMultiplayerGameState());
+            var stateTask = RunOnMainThread(() => AddCombatSyncState(BuildMultiplayerGameState()));
             var state = stateTask.GetAwaiter().GetResult();
 
             if (format == "markdown")
@@ -396,7 +396,7 @@ public static partial class McpMod
 
         try
         {
-            var stateTask = RunOnMainThread(() => BuildGameState());
+            var stateTask = RunOnMainThread(() => AddCombatSyncState(BuildGameState()));
             var state = stateTask.GetAwaiter().GetResult();
 
             if (format == "markdown")

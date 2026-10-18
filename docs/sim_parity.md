@@ -62,6 +62,16 @@
 
 `sim_order`는 그 노드가 sts2-cli `choices`에서 몇 번째인지(같은 분기 규칙으로 계산, 없으면 null). 봇은 `next_options`를 `sim_order`로 정렬해 쓰고, 명령은 기존 `index`로 보낸다. 시작 노드가 0번을 차지하는 경우 자식은 1부터 시작하므로 절대값이 아니라 정렬 키로 쓴다. `Children`은 `HashSet<MapPoint>`다. .NET HashSet의 열거 순서는 내부 항목 배열 순서(삽입 순서, 제거 뒤에는 빈 칸 재사용)라 해시값과 무관하고, 같은 시드·같은 DLL의 같은 추가/제거 과정이면 게임과 시뮬레이터 순서가 같다(실제 게임 대조는 아직 안 함).
 
+## 행동 처리 중 여부(실제 게임에만 있는 문제)
+
+시뮬레이터는 명령 하나를 끝까지 처리한 뒤 다음 결정 상태를 돌려주므로 "처리 중" 상태가 없다. 실제 게임은 행동 큐가 프레임마다 돌아서, 명령 직후 상태를 읽으면 아직 반영 전일 수 있다(증류된 혼돈의 자동 사용 3장, 털어내기의 뽑기가 약 1.8초 뒤 도착, 에너지 0으로 보고 턴 종료).
+이 브랜치에서 전투 중 모든 응답 최상위에 `action_queue_busy`·`state_version`·`action_queue{...}`를 넣었다(정확한 의미는 `raw-full.md` "Combat Sync Fields").
+
+- `action_queue_busy` = 행동 실행기 루프가 도는 중(`ActionExecutor.IsRunning`) 또는 플레이어 큐의 맨 앞 행동이 실행 중이거나 지금 실행될 수 있음(게임 `GetReadyAction`과 같은 규칙) 또는 카드/포션 효과 본문 실행 중(`IsExecutingCardOrPotionEffect`, 자동 사용 포함, 단 선택 대기 중이면 제외 — 선택을 기다리는 효과도 깊이가 남아 있으므로). 플레이어 선택을 기다리며 멈춘 행동과 그 뒤에 막혀 있는 행동은 세지 않는다(`awaiting_player_choice`로 따로). 그래서 선택 화면에서는 busy가 false가 된다.
+- 덮는 것: 카드·포션 사용(뽑기·섞기·자동 사용·연쇄 훅 포함, 모두 행동 안에서 await됨), 턴 종료 행동, 선택 뒤 재개. 싱글플레이에서 `play_card`/`use_potion`은 POST 처리 중에 바로 큐에 들어가고 실행기가 같은 호출 안에서 시작되므로, POST 뒤 첫 GET부터 busy가 보인다.
+- 덮지 않는 것: 큐 밖에서 도는 턴 전환(플레이어 턴 시작의 에너지·뽑기, 적 턴)은 busy가 아니라 기존 `battle.is_play_phase`(턴 단계가 `Play`가 된 뒤에만 true)로 판단해야 한다. 행동이 끝난 뒤의 순수 연출(카드가 더미로 날아가는 트윈)은 상태에 영향이 없어 포함하지 않는다. 멀티플레이 클라이언트의 요청 전송 지연, 적 턴 중 요청해 플레이어 턴까지 미뤄진 행동은 큐에 없어 보이지 않는다.
+- 권장 판단: 전투 결정은 `battle.is_play_phase && !action_queue_busy`일 때만, 명령 뒤에는 `state_version`이 바뀌고 busy가 false가 될 때까지 기다린다.
+
 ## 결정에 영향이 큰 남은 차이 (우선순위)
 
 1. **디펙트 구체 수치 0(한국어면 종류도 0)** — 어댑터에서 `type = id.removesuffix("_ORB").title()`, `passive = int(passive_val)`, `evoke = int(evoke_val)`로 옮기면 해결(모드 수정 불필요). 디펙트 전투 내내 관측이 틀림.
@@ -90,6 +100,8 @@
 
 전투 중 손패 선택(`hand_select`): `min_select`(= min(`prefs.MinSelect`, 후보 수), sts2-cli 선택기와 같은 보정), `max_select`(`prefs.MaxSelect`), `purpose`(sts2-cli와 같은 규칙: `card_selection.TO_X` → `x`, 아니면 업그레이드 모드 `upgrade`, 그 밖 `hand`), `prompt_key`("table.ENTRY"), `cancelable`, `require_manual_confirmation`. `cards[]`·`selected_cards[]`에 `card_uid`(NetCombatCardDb 전투 카드 id)·`hand_index`(`player.hand` 위치, 선택 중 고정)·`id`. `selected_cards`는 게임 `_selectedCards` 목록(업그레이드 미리보기 칸 포함)에서 만든다. 남은 차이: 시뮬레이터는 후보가 1장이고 min≥1이면 수동 확정 여부와 상관없이 자동 선택하지만 게임은 `RequireManualConfirmation`이면 화면을 띄운다.
 
+전투 중 모든 응답(최상위): `action_queue_busy`, `state_version`, `action_queue{executor_running, current_action, pending_actions, queued_actions, awaiting_player_choice, card_or_potion_effect_running, executor_paused, combat_paused, player_actions_disabled, hand_in_card_play}` — 위 "행동 처리 중 여부" 참고.
+
 지도(`map.next_options[]`): `sim_order`(int 또는 null) — 위 "지도 선택" 참고.
 
 파워(플레이어·적·Osty `status[]`): `raw_amount` = `PowerModel.Amount`(sts2-cli `amount`와 같은 값). 기존 `amount`(= `DisplayAmount`)는 그대로.
@@ -98,5 +110,6 @@
 
 - 실제 게임에서 `stats`/`damage_by_target` 값이 같은 상황의 시뮬레이터 값과 일치하는지(힘·취약·종이 개구리·해체·소용돌이로 대조 필요).
 - 상태 요청 뒤 손패 카드 미리보기를 기본값으로 되돌려도 화면 표시·카드 사용에 문제가 없는지(PreviewValue는 표시 전용이고 NCard가 다음 갱신 때 다시 계산하지만, 렌더된 문구가 바뀌는 순간은 육안 확인 필요).
+- `action_queue_busy`가 증류된 혼돈·털어내기 같은 경우 실제로 결과가 반영될 때까지 true로 유지되는지, 턴 시작 직후 `is_play_phase`와 함께 쓰면 빈틈이 없는지.
 - hand_select의 `min_select`/`max_select`/`prompt_key`가 실제 카드(정화류 "최대 N장", 소멸·버리기·무장)에서 sts2-cli 값과 같은지, 선택 중 고른 카드가 손패 더미에 남아 `hand_index`가 고정되는지.
 - 의도 라벨이 한국어 설정에서도 `12x2` 형식으로 남는지(어댑터가 새 `damage`/`hits` 키로 바꾸기 전까지의 전제).

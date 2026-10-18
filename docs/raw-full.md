@@ -42,6 +42,49 @@ Every response (except `menu`) includes these top-level fields alongside the sta
 }
 ```
 
+### Combat Sync Fields (any state while combat is in progress)
+
+Added to every GET response (single- and multiplayer endpoints) whenever `CombatManager.IsInProgress`,
+whatever the `state_type` (`monster`/`elite`/`boss`, `hand_select`, `card_select` and other overlays opened mid-combat).
+Read on the main thread in the same frame as the rest of the state.
+
+```jsonc
+{
+  "action_queue_busy": false,  // executor_running || pending_actions > 0 ||
+                               //   (card_or_potion_effect_running && !awaiting_player_choice).
+                               // true = the game is still resolving actions; the rest of the state may be stale
+                               // within a moment (energy, hand, draws). Wait until false before deciding.
+  "state_version": 1234,       // Monotonic counter (never resets while the game runs), +1 on every
+                               // ActionExecutor.BeforeActionExecuted / AfterActionExecuted and every
+                               // CombatManager.TurnStarted / TurnEnded / PlayerActionsDisabledChanged.
+                               // Starts counting at the first state request of a run. Compare before/after a command
+                               // to know an action actually ran (a PlayCardAction canceled during a player choice
+                               // does not bump it).
+  "action_queue": {
+    "executor_running": false,       // ActionExecutor.IsRunning: the executor loop is processing ready actions
+                                     // (each action is awaited to completion, including its animations/draws)
+    "current_action": null,          // Type name of ActionExecutor.CurrentlyRunningAction, e.g. "PlayCardAction"
+    "pending_actions": 0,            // Player queues whose front action is executing or can run now
+                                     // (same rules as ActionQueueSet.GetReadyAction: front non-canceled action in
+                                     // WaitingForExecution/ReadyToResumeExecuting, not NonCombat, not a
+                                     // play-phase-only action on a paused queue). Actions stuck behind a player
+                                     // choice are not counted.
+    "queued_actions": 0,             // All non-canceled, unfinished actions in all player queues (informational)
+    "awaiting_player_choice": false, // Some queued action is paused in GatheringPlayerChoice (hand/card select open)
+    "card_or_potion_effect_running": false, // CombatManager.IsExecutingCardOrPotionEffect(local player),
+                                            // incl. nested auto-plays; stays true while that effect waits on a
+                                            // hand/card select, hence not counted in busy then
+    "executor_paused": false,        // ActionExecutor.IsPaused
+    "combat_paused": false,          // CombatManager.IsPaused
+    "player_actions_disabled": false,// CombatManager.PlayerActionsDisabled
+    "hand_in_card_play": false       // NPlayerHand.InCardPlay (a UI drag/targeting is in progress)
+  }
+}
+```
+
+A safe "ready to act" check for a bot: `battle.is_play_phase && !action_queue_busy` (for a selection screen:
+`!action_queue_busy && action_queue.awaiting_player_choice`). If `action_queue_error` is present, the fields could not be read.
+
 ### Player Object
 
 Always present at the top level (except `menu`). Contains everything about the local player.
