@@ -124,20 +124,32 @@ public static partial class McpMod
             }
 
             int used = 0;
-            foreach (var it in p.Items ?? new List<OverlayItem>())
+            var view = _ovRoot!.GetViewportRect();
+            // The map opens over a finished event while its option buttons stay "visible" underneath.
+            bool covered = p.Screen == "event" && IsMapScreenOpenOrVisible();
+            foreach (var it in covered ? new List<OverlayItem>() : p.Items ?? new List<OverlayItem>())
             {
                 if (it.Slot < 0 || it.Slot >= _ovTargets.Count)
                     continue;
                 var target = _ovTargets[it.Slot];
                 if (target == null || !IsNodeVisible(target))
                     continue;
+                var rect = target.GetGlobalRect();
+                if (!view.HasPoint(rect.GetCenter()))                // scrolled off (card grid)
+                    continue;
                 var lbl = OverlayLabel(used++);
                 lbl.Text = (it.Chosen ? "★ " : "") + (it.Text ?? $"{it.Prob * 100:0}%") + (it.Rule ? " 규칙" : "");
                 lbl.AddThemeColorOverride("font_color", it.Chosen ? OvChosen : it.Rule ? OvRule : OvPlain);
                 lbl.ResetSize();
-                var rect = target.GetGlobalRect();
-                lbl.Position = new Vector2(rect.Position.X + rect.Size.X / 2 - lbl.Size.X / 2,
-                                           rect.Position.Y - lbl.Size.Y - 4);
+                if (rect.Size.X > 2.5f * rect.Size.Y)
+                    // Wide rows stacked vertically (event options): above the row would sit on the previous row.
+                    lbl.Position = new Vector2(rect.End.X - lbl.Size.X - 12, rect.Position.Y + (rect.Size.Y - lbl.Size.Y) / 2);
+                else if (p.Screen == "card_select")
+                    // Inside the card's top edge: above the grid's first row is the prompt.
+                    lbl.Position = new Vector2(rect.Position.X + rect.Size.X / 2 - lbl.Size.X / 2, rect.Position.Y + 8);
+                else
+                    lbl.Position = new Vector2(rect.Position.X + rect.Size.X / 2 - lbl.Size.X / 2,
+                                               rect.Position.Y - lbl.Size.Y - 4);
                 lbl.Visible = true;
             }
             for (int i = used; i < _ovLabels.Count; i++)
