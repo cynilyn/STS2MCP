@@ -1508,6 +1508,28 @@ public static partial class McpMod
                     }
                 }
                 catch { /* intent label may fail for some types */ }
+                // Numeric attack damage exactly as sts2-cli CombatPlayState: any AttackIntent subtype
+                // (Single/Multi/DeathBlow). Multi-hit: per-hit `damage` + `hits` + `total_damage`;
+                // otherwise `damage` = total.
+                var playerCreatures = CombatManager.Instance.DebugOnlyGetState()?.PlayerCreatures?.ToList();
+                if (intent is AttackIntent atk && playerCreatures != null)
+                {
+                    try
+                    {
+                        var hits = atk.Repeats;
+                        if (hits > 1)
+                        {
+                            intentData["damage"] = atk.GetSingleDamage(playerCreatures, creature);
+                            intentData["hits"] = hits;
+                            intentData["total_damage"] = atk.GetTotalDamage(playerCreatures, creature);
+                        }
+                        else
+                        {
+                            intentData["damage"] = atk.GetTotalDamage(playerCreatures, creature);
+                        }
+                    }
+                    catch { }
+                }
                 intents.Add(intentData);
             }
             state["intents"] = intents;
@@ -2530,6 +2552,7 @@ public static partial class McpMod
                     ["id"] = power.Id.Entry,
                     ["name"] = SafeGetText(() => power.Title),
                     ["amount"] = power.DisplayAmount,
+                    ["raw_amount"] = power.Amount, // sts2-cli's power `amount`
                     ["type"] = power.Type.ToString(),
                     ["description"] = resolvedDesc,
                     ["keywords"] = BuildHoverTips(extraTips)

@@ -28,9 +28,9 @@
 | 순서·`index` | 슬롯, target_index | 살아 있는 적만, 같은 순서 | 동일 |
 | `id` | 적 임베딩 | `entity_id`에서 `_N` 제거 | 동일 |
 | `hp`, `max_hp`, `block` | enemy_features, hand_kill | 같은 필드 | 동일 |
-| `intents[].damage/hits/total_damage` | enemy f[5], threat, turn_obs | `label` 문자열("12x2")을 정규식으로 | 근사: 숫자는 같은 `GetSingleDamage`/`GetTotalDamage`에서 나옴. 단 어댑터가 `type == "Attack"`만 파싱 → **DeathBlow 의도(AttackIntent 하위)의 피해 누락** |
+| `intents[].damage/hits/total_damage` | enemy f[5], threat, turn_obs | 예전: `label` 문자열("12x2")을 정규식으로(어댑터가 `type == "Attack"`만 파싱 → DeathBlow 피해 누락) | 동일 → `damage`/`hits`/`total_damage`(이 브랜치, sts2-cli와 같은 키·계산, DeathBlow 포함). 어댑터가 그대로 넘기면 됨 |
 | `intends_attack` | enemy f[4] | Attack 의도 유무로 추정 | 근사(`Monster.IntendsToAttack`, DeathBlow 포함 여부 다름) |
-| `powers[].id/amount` | enemy_pw_ids/amt, 반사, 측면 | `status`: `IsVisible`만, `DisplayAmount` | 근사: `DisplayAmount`를 재정의한 파워 13종(SLOW는 Amount×10, HARDENED_SHELL은 남은 양 등)의 값이 다름. 숨은 파워는 AMBERGRIS 1종뿐 |
+| `powers[].id/amount` | enemy_pw_ids/amt, 반사, 측면 | `status`: `IsVisible`만, `amount` = `DisplayAmount`, `raw_amount` = `Amount`(이 브랜치) | `amount`는 `DisplayAmount`를 재정의한 파워 13종(SLOW는 Amount×10, HARDENED_SHELL은 남은 양 등)에서 다름 → `raw_amount`를 쓰면 수치 동일. 남은 차이는 숨은 파워 AMBERGRIS 1종(목록에서 빠짐) |
 | `side` | turn_obs | 없음 | 인코더가 BACK_ATTACK_* 파워로 대신 판정 → 동일 효과 |
 
 ## 플레이어·전투
@@ -42,7 +42,7 @@
 | `round` | player f[6] | `battle.round` = `RoundNumber` | 동일 |
 | `draw/discard_pile_count` | player f[7..8] | 같은 필드 | 동일 |
 | `draw/discard/exhaust_pile` (정렬 ID, "+"=강화) | 더미 장수 벡터, v4 더미 효과 | 예전: 현지화 이름만 → 이름→ID 역변환(동명 카드는 캐릭터 접미사로 추정) | 근사 → 더미 카드에 `id`·`is_upgraded`(이 브랜치). 어댑터 `card_ids`가 이미 `id`를 우선 사용 |
-| `player_powers` | player_pw_ids/amt, turn_obs(SURROUNDED) | `status` (보이는 것만, DisplayAmount) | 근사(적 파워와 같은 차이) |
+| `player_powers` | player_pw_ids/amt, turn_obs(SURROUNDED) | `status` (보이는 것만, `amount`=DisplayAmount, `raw_amount`=Amount(이 브랜치)) | `raw_amount`로 수치 동일, 숨은 파워(AMBERGRIS)만 차이 |
 | `facing` | turn_obs | 없음 | **없음**: 황제 게 전투에서 turn_obs가 항상 0 (facing 관측을 켠 모델만 영향) |
 | `player.potions` (보유 전부, index=보유 순번) | potion_ids, 포션 마스크, potion_effect | 슬롯 순서, 어댑터가 `can_use_in_combat` 아닌 것 제외 | 근사(전투 불가 포션이 시뮬레이터엔 보임, 칸 순서 다를 수 있음). 효과 vars는 카탈로그의 정적 값 |
 | `player.relics[].id` | 유물 multi-hot | 같은 `Id.Entry` | 동일 |
@@ -58,8 +58,8 @@
 2. **네크로바인더 Osty 0** — 어댑터에서 `pets[0]`(id OSTY)를 `osty`로 옮기면 해결. 또는 모드가 시뮬레이터처럼 최상위 `osty`도 보냄.
 3. **카드 수치·대상별 피해** — 이 브랜치의 `stats`·`damage_by_target`를 어댑터가 그대로 쓰도록 바꾸면 해소(정규식·취약 1.5 근사 제거). 처치 판정(hand_kill)과 전체 공격 가치에 직접 영향.
 4. **X 비용 카드 표시(f[0], f[13])** — 어댑터가 `cost`를 `energy_cost`로 쓰면 시뮬레이터와 같아짐. 지금은 학습 때 본 적 없는 is_x=1 입력.
-5. **DeathBlow 의도 피해 누락** — 모드가 시뮬레이터처럼 의도에 `damage`/`hits`/`total_damage` 숫자 필드를 직접 넣는 것을 권장(`AttackIntent`면 `Repeats>1`일 때 `GetSingleDamage`·`Repeats`·`GetTotalDamage`, 아니면 `GetTotalDamage`). 라벨 정규식 의존도 없어짐. 위협(threat) 특징에 직접 영향.
-6. **파워 수치 차이** — 모드 파워 항목에 `raw_amount`(= `Amount`)를 추가하고 어댑터가 그것을 쓰도록 권장(슬로우·단단한 껍질 등 13종). 숨은 파워(AMBERGRIS)까지 맞추려면 `IsVisible` 필터 없는 목록도 필요.
+5. **의도 피해(DeathBlow 누락)** — 이 브랜치에서 모드가 의도에 `damage`/`hits`/`total_damage`를 직접 넣음. 어댑터가 라벨 정규식 대신 이 키를 쓰면 해소. 위협(threat) 특징에 직접 영향.
+6. **파워 수치 차이** — 이 브랜치에서 모든 파워 항목에 `raw_amount`(= `Amount`) 추가. 어댑터 `_powers`가 `raw_amount`를 우선 쓰면 슬로우·단단한 껍질 등 13종이 맞춰짐. 숨은 파워(AMBERGRIS)까지 맞추려면 `IsVisible` 필터 없는 목록이 더 필요.
 7. **카드 키워드** — 어댑터가 `card_keywords`를 우선 사용.
 8. **rarity(v4)·potion 순서·facing·min/max_select** — 영향 작음. facing은 모드에 `SurroundedPower.Facing` 추가로 해결.
 
@@ -76,8 +76,12 @@
 
 더미 카드(`draw_pile`/`discard_pile`/`exhaust_pile`): `id`, `is_upgraded`.
 
+적 의도(`battle.enemies[].intents[]`, `AttackIntent` 하위 전부: Attack·DeathBlow): `hits > 1`이면 `damage`(타당 `GetSingleDamage`)·`hits`(`Repeats`)·`total_damage`(`GetTotalDamage`), 아니면 `damage`(`GetTotalDamage`)만. 대상 목록은 sts2-cli처럼 `CombatManager.DebugOnlyGetState().PlayerCreatures`.
+
+파워(플레이어·적·Osty `status[]`): `raw_amount` = `PowerModel.Amount`(sts2-cli `amount`와 같은 값). 기존 `amount`(= `DisplayAmount`)는 그대로.
+
 ## 게임 없이 확인하지 못한 것
 
 - 실제 게임에서 `stats`/`damage_by_target` 값이 같은 상황의 시뮬레이터 값과 일치하는지(힘·취약·종이 개구리·해체·소용돌이로 대조 필요).
 - 상태 요청 뒤 손패 카드 미리보기를 기본값으로 되돌려도 화면 표시·카드 사용에 문제가 없는지(PreviewValue는 표시 전용이고 NCard가 다음 갱신 때 다시 계산하지만, 렌더된 문구가 바뀌는 순간은 육안 확인 필요).
-- 의도 라벨이 한국어 설정에서도 `12x2` 형식으로 남는지(현재 어댑터 근사의 전제).
+- 의도 라벨이 한국어 설정에서도 `12x2` 형식으로 남는지(어댑터가 새 `damage`/`hits` 키로 바꾸기 전까지의 전제).

@@ -169,7 +169,8 @@ Used for both player `status` and enemy `status`.
 {
   "id": "STRENGTH",
   "name": "Strength",
-  "amount": 3,
+  "amount": 3,              // Displayed amount (PowerModel.DisplayAmount)
+  "raw_amount": 3,          // PowerModel.Amount, the value sts2-cli reports as `amount` (differs for e.g. Slow, Hardened Shell)
   "type": "Buff",            // "Buff" or "Debuff"
   "description": "Increases attack damage by 3.",
   "keywords": [ /* Keyword Objects */ ]
@@ -367,7 +368,16 @@ Run state or room type not recognized.
             "type": "Attack",          // Attack, Defend, Buff, Debuff, Sleep, etc.
             "label": "11",             // Damage number or short label
             "title": "Attack",         // Hover tip title
-            "description": "Deals 11 damage."  // Hover tip description
+            "description": "Deals 11 damage.", // Hover tip description
+            // Attack intents only (Attack, DeathBlow; same values/keys as sts2-cli):
+            "damage": 11               // Total damage for single-hit attacks
+          },
+          {
+            "type": "Attack",
+            "label": "5x3",
+            "damage": 5,               // Multi-hit: per-hit damage
+            "hits": 3,                 // Present only when hits > 1
+            "total_damage": 15         // Present only when hits > 1
           }
         ]
       }
