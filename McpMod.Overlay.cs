@@ -15,6 +15,7 @@ using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Nodes.Events;
 using MegaCrit.Sts2.Core.Nodes.Events.Custom;
+using MegaCrit.Sts2.Core.Nodes.RestSite;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
@@ -34,6 +35,8 @@ public class OverlayItem
     public bool Chosen { get; set; }
     public bool Rule { get; set; }
     public string? Label { get; set; }
+    // Replaces the percent (slot label) or the percent + label (panel line), e.g. when a judge overrode the model.
+    public string? Text { get; set; }
 }
 
 public class OverlayPanel
@@ -49,7 +52,7 @@ public class OverlayPanel
 
 public class OverlayPayload
 {
-    // combat | hand_select | card_reward | map | event | shop | panel (panel only)
+    // combat | hand_select | card_reward | map | event | shop | rest_site | card_select | panel (panel only)
     public string? Screen { get; set; }
     public List<OverlayItem>? Items { get; set; }
     public OverlayPanel? Panel { get; set; }
@@ -129,7 +132,7 @@ public static partial class McpMod
                 if (target == null || !IsNodeVisible(target))
                     continue;
                 var lbl = OverlayLabel(used++);
-                lbl.Text = (it.Chosen ? "★ " : "") + $"{it.Prob * 100:0}%" + (it.Rule ? " 규칙" : "");
+                lbl.Text = (it.Chosen ? "★ " : "") + (it.Text ?? $"{it.Prob * 100:0}%") + (it.Rule ? " 규칙" : "");
                 lbl.AddThemeColorOverride("font_color", it.Chosen ? OvChosen : it.Rule ? OvRule : OvPlain);
                 lbl.ResetSize();
                 var rect = target.GetGlobalRect();
@@ -315,7 +318,7 @@ public static partial class McpMod
         _ovBar.Value = bar;
         _ovBar.Visible = panel.WinProb != null || panel.Value != null;
         foreach (var t in panel.Top ?? new List<OverlayItem>())
-            lines.Add((t.Chosen ? "★ " : "   ") + $"{t.Prob * 100,3:0}%  {t.Label}" + (t.Rule ? "  [규칙]" : ""));
+            lines.Add((t.Chosen ? "★ " : "   ") + (t.Text ?? $"{t.Prob * 100,3:0}%  {t.Label}") + (t.Rule ? "  [규칙]" : ""));
         if (!string.IsNullOrEmpty(panel.Note))
             lines.Add(panel.Note!);
         if (panel.Highlights is { Count: > 0 })
@@ -400,6 +403,27 @@ public static partial class McpMod
                 var room = NEventRoom.Instance;
                 if (room != null)
                     result.AddRange(FindAll<NEventOptionButton>(room).Select(b => (Control?)b));
+                break;
+            }
+            case "rest_site":
+            {
+                // choose_rest_option index = NRestSiteButton order under the room (same lookup as the action).
+                var restRoom = NRestSiteRoom.Instance;
+                if (restRoom != null)
+                    result.AddRange(FindAll<NRestSiteButton>(restRoom).Select(b => (Control?)b));
+                break;
+            }
+            case "card_select":
+            {
+                // select_card index = grid holders sorted by position (same lookup as the action and the state).
+                Node? sel = NOverlayStack.Instance?.Peek() switch
+                {
+                    NCardGridSelectionScreen g => g,
+                    NChooseACardSelectionScreen c => c,
+                    _ => null
+                };
+                if (sel != null)
+                    result.AddRange(FindAllSortedByPosition<NGridCardHolder>(sel).Select(h => (Control?)h));
                 break;
             }
         }
