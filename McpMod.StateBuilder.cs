@@ -1317,12 +1317,16 @@ public static partial class McpMod
             // Read the description in the same Normal preview the UI shows, so it does not depend
             // on whether the preview was cleared by an earlier state request.
             previewDescription = SafeGetCardDescription(card);
+        }
+        catch { }
+        finally
+        {
             // Restore the live card to base state. UpdateDynamicVarPreview mutates the
             // card's preview (and for self-cost cards like Momentum Strike, leaving it in
             // preview state corrupts the subsequent PlayCardAction — card stays in hand).
-            card.DynamicVars.ClearPreview();
+            // In a finally (sts2-cli clears inside the try) so a throw never leaves it in preview.
+            try { card.DynamicVars.ClearPreview(); } catch { }
         }
-        catch { }
         if (previewDescription != null)
             state["description"] = previewDescription;
 
@@ -1380,7 +1384,7 @@ public static partial class McpMod
                     damageByTarget.Add(row);
                 }
                 catch { }
-                finally { card.DynamicVars.ClearPreview(); }
+                finally { try { card.DynamicVars.ClearPreview(); } catch { } }
             }
         }
 
@@ -2289,6 +2293,43 @@ public static partial class McpMod
     {
         var state = new Dictionary<string, object?>();
 
+        // Hand pile in model order. Selected cards leave the UI hand but stay in this pile until the
+        // selection resolves, so an index here is stable for the whole selection.
+        var handCards = LocalContext.GetMe(runState)?.PlayerCombatState?.Hand?.Cards?.ToList()
+            ?? new List<CardModel>();
+
+        // Selection limits from the game's CardSelectorPrefs (private NPlayerHand._prefs), reported like
+        // sts2-cli's card_select: min_select / max_select (min clamped to the number of options,
+        // as sts2-cli's selector does), purpose, prompt key.
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        List<CardModel>? selectedModels = null;
+        try { selectedModels = (typeof(NPlayerHand).GetField("_selectedCards", flags)?.GetValue(hand) as List<CardModel>)?.ToList(); }
+        catch { }
+        try
+        {
+            if (typeof(NPlayerHand).GetField("_prefs", flags)?.GetValue(hand)
+                is MegaCrit.Sts2.Core.CardSelection.CardSelectorPrefs prefs)
+            {
+                int optionCount = hand.ActiveHolders.Count(h => h.CardModel != null) + (selectedModels?.Count ?? 0);
+                state["min_select"] = Math.Min(prefs.MinSelect, optionCount);
+                state["max_select"] = prefs.MaxSelect;
+                state["cancelable"] = prefs.Cancelable;
+                state["require_manual_confirmation"] = prefs.RequireManualConfirmation;
+                string? promptKey = null;
+                string purpose = hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect ? "upgrade" : "hand";
+                var prompt = prefs.Prompt;
+                if (prompt != null && !prompt.IsEmpty)
+                {
+                    promptKey = prompt.LocTable + "." + prompt.LocEntryKey;
+                    if (prompt.LocTable == "card_selection" && prompt.LocEntryKey.StartsWith("TO_"))
+                        purpose = prompt.LocEntryKey.Substring(3).ToLowerInvariant();
+                }
+                state["purpose"] = purpose;
+                state["prompt_key"] = promptKey;
+            }
+        }
+        catch { }
+
         // Mode
         state["mode"] = hand.CurrentMode switch
         {
@@ -2319,14 +2360,35 @@ public static partial class McpMod
             var cardInfo = BuildCardInfo(card);
             cardInfo["index"] = index;
             cardInfo["description"] = SafeGetCardDescription(card); // hand cards use default pile
+            AddHandSelectCardIds(cardInfo, card, handCards);
             selectableCards.Add(cardInfo);
             index++;
         }
         state["cards"] = selectableCards;
 
-        // Already-selected cards (in the SelectedHandCardContainer)
+        // Already-selected cards. Prefer the game's own _selectedCards list (also covers the upgrade
+        // preview slot); fall back to the SelectedHandCardContainer holders.
         var selectedContainer = hand.GetNodeOrNull<Godot.Control>("%SelectedHandCardContainer");
-        if (selectedContainer != null)
+        if (selectedModels != null)
+        {
+            var selectedCards = new List<Dictionary<string, object?>>();
+            int selIdx = 0;
+            foreach (var card in selectedModels)
+            {
+                if (card == null) continue;
+                var entry = new Dictionary<string, object?>
+                {
+                    ["index"] = selIdx,
+                    ["name"] = SafeGetText(() => card.Title)
+                };
+                AddHandSelectCardIds(entry, card, handCards);
+                selectedCards.Add(entry);
+                selIdx++;
+            }
+            if (selectedCards.Count > 0)
+                state["selected_cards"] = selectedCards;
+        }
+        else if (selectedContainer != null)
         {
             var selectedCards = new List<Dictionary<string, object?>>();
             var selectedHolders = FindAll<NSelectedHandCardHolder>(selectedContainer);
@@ -2335,11 +2397,13 @@ public static partial class McpMod
             {
                 var card = holder.CardModel;
                 if (card == null) continue;
-                selectedCards.Add(new Dictionary<string, object?>
+                var entry = new Dictionary<string, object?>
                 {
                     ["index"] = selIdx,
                     ["name"] = SafeGetText(() => card.Title)
-                });
+                };
+                AddHandSelectCardIds(entry, card, handCards);
+                selectedCards.Add(entry);
                 selIdx++;
             }
             if (selectedCards.Count > 0)
@@ -2351,6 +2415,24 @@ public static partial class McpMod
         state["can_confirm"] = confirmBtn?.IsEnabled ?? false;
 
         return state;
+    }
+
+    /// <summary>
+    /// Stable identifiers for a card in an in-combat hand selection: `card_uid` (per-instance combat
+    /// card id from NetCombatCardDb, unique even for identical duplicates) and `hand_index` (position
+    /// in the hand pile, which keeps selected cards until the selection resolves = player.hand index).
+    /// </summary>
+    private static void AddHandSelectCardIds(Dictionary<string, object?> entry, CardModel card, List<CardModel> handCards)
+    {
+        if (!entry.ContainsKey("id")) entry["id"] = card.Id.Entry;
+        try
+        {
+            if (MegaCrit.Sts2.Core.GameActions.Multiplayer.NetCombatCardDb.Instance.TryGetCardId(card, out var uid))
+                entry["card_uid"] = uid;
+        }
+        catch { }
+        int handIndex = handCards.FindIndex(c => ReferenceEquals(c, card));
+        entry["hand_index"] = handIndex >= 0 ? handIndex : (int?)null;
     }
 
     private static Dictionary<string, object?> BuildRelicSelectState(NChooseARelicSelection screen, RunState runState)

@@ -398,9 +398,16 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
   "hand_select": {
     "mode": "simple_select",     // "simple_select" or "upgrade_select"
     "prompt": "Select a card to Exhaust.",
-    "cards": [
+    // From the game's CardSelectorPrefs (same names/semantics as sts2-cli card_select):
+    "min_select": 0,             // min(prefs.MinSelect, number of options incl. already-selected)
+    "max_select": 2,             // prefs.MaxSelect ("up to N" = min 0, max N)
+    "purpose": "exhaust",        // "card_selection.TO_X" prompt -> "x"; else "upgrade" (upgrade_select) or "hand"
+    "prompt_key": "card_selection.TO_EXHAUST", // Prompt LocString "table.ENTRY", language independent; null if none
+    "cancelable": false,         // prefs.Cancelable
+    "require_manual_confirmation": true, // prefs.RequireManualConfirmation
+    "cards": [                   // Remaining selectable cards; re-indexed after each pick
       {
-        "index": 0,
+        "index": 0,              // Use this with combat_select_card
         "id": "STRIKE_R",
         "name": "Strike",
         "type": "Attack",
@@ -408,11 +415,13 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
         "star_cost": null,       // Regent star cost as string, null if N/A
         "description": "Deal 6 damage.",
         "is_upgraded": false,
-        "keywords": [ /* Keyword Objects */ ]
+        "keywords": [ /* Keyword Objects */ ],
+        "card_uid": 17,          // Per-instance combat card id (NetCombatCardDb); unique even for duplicates
+        "hand_index": 3          // Index in player.hand; stable for the whole selection
       }
     ],
-    "selected_cards": [          // Only present if cards have been selected
-      { "index": 0, "name": "Defend" }
+    "selected_cards": [          // Only present if cards have been selected (game's selection order)
+      { "index": 0, "name": "Defend", "id": "DEFEND_R", "card_uid": 12, "hand_index": 1 }
     ],
     "can_confirm": false
   },

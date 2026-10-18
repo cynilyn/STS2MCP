@@ -50,7 +50,9 @@
 | `orbs[].type/passive/evoke`, `orb_slots` | orb_ids, orb_feat | `orbs[].id`("LIGHTNING_ORB")·`name`(현지화)·`passive_val`·`evoke_val` | **어댑터 불일치**: 인코더는 `type`(없으면 `name`)·`passive`/`evoke`를 읽음 → 수치는 항상 0, 어휘는 게임 언어가 영어일 때만 맞음(한국어면 0) |
 | `stars` | context | 별 카운터 표시 조건이 다름(시뮬레이터: 리젠트면 항상) | 거의 동일 |
 | `osty` {alive,hp,max_hp,block} | context | 모드는 `pets[]`(Osty)로 보냄, 어댑터는 `osty`만 복사 | **어댑터 불일치**: 네크로바인더 Osty 특징 전부 0 |
-| `min_select`/`max_select` (card_select) | 선택 마스크, player f[11] | hand_select에 없음 → 어댑터 추정 | 근사 |
+| `min_select`/`max_select`/`purpose`/`prompt` (card_select) | 선택 마스크, player f[11], select_ctx·select_text | 예전: 없음 → 어댑터가 max=1로 추정해 첫 장 뒤 바로 확정. `prompt`는 현지화 문장 | → `min_select`·`max_select`·`purpose`·`prompt_key`(이 브랜치, 게임 `CardSelectorPrefs`에서). 어댑터가 `prompt_key`를 시뮬레이터 `prompt`로 넘기면 됨 |
+| card_select 후보 목록(선택 내내 고정, `picks`로 누적) | 선택 마스크 | 모드는 고른 카드를 목록에서 빼고 다시 번호를 매김 | → 후보·선택 카드에 `card_uid`·`hand_index`(이 브랜치). `hand_index`로 정렬한 (선택됨 + 남은 후보)가 시뮬레이터 후보 순서(손패 순서)와 같고, `card_uid`로 같은 카드 중복도 구분 |
+| card_select 후보의 `stats`(BaseValue)·`cost`(int)·`keywords`(enum) | card_features, hand_stats | hand_select 후보에는 없음 | 없음(남은 차이) |
 
 ## 지도 선택(비전투 모델)
 
@@ -69,13 +71,13 @@
 5. **의도 피해(DeathBlow 누락)** — 이 브랜치에서 모드가 의도에 `damage`/`hits`/`total_damage`를 직접 넣음. 어댑터가 라벨 정규식 대신 이 키를 쓰면 해소. 위협(threat) 특징에 직접 영향.
 6. **파워 수치 차이** — 이 브랜치에서 모든 파워 항목에 `raw_amount`(= `Amount`) 추가. 어댑터 `_powers`가 `raw_amount`를 우선 쓰면 슬로우·단단한 껍질 등 13종이 맞춰짐. 숨은 파워(AMBERGRIS)까지 맞추려면 `IsVisible` 필터 없는 목록이 더 필요.
 7. **카드 키워드** — 어댑터가 `card_keywords`를 우선 사용.
-8. **rarity(v4)·potion 순서·facing·min/max_select** — 영향 작음. facing은 모드에 `SurroundedPower.Facing` 추가로 해결.
+8. **rarity(v4)·potion 순서·facing·hand_select 후보의 stats/cost/keywords** — 영향 작음. facing은 모드에 `SurroundedPower.Facing` 추가로 해결.
 
 ## 이 브랜치에서 모드에 추가한 필드
 
 손패 카드(`player.hand[]`):
 
-- `stats`: `{소문자 DynamicVar 이름: int PreviewValue}` — `ClearPreview → UpdateDynamicVarPreview(Normal, CurrentTarget) → 읽기 → ClearPreview`, 시뮬레이터와 같은 호출 순서.
+- `stats`: `{소문자 DynamicVar 이름: int PreviewValue}` — `ClearPreview → UpdateDynamicVarPreview(Normal, CurrentTarget) → 읽기 → ClearPreview`, 시뮬레이터와 같은 호출 순서(마지막 ClearPreview는 예외가 나도 돌도록 finally).
 - `damage_by_target`: 공격 카드(AnyEnemy/AllEnemies)만, 살아 있는 적마다 `{target_index, enemy_id, name, damage, repeat?, total_damage?}`. `MultiCreatureTargeting` 미리보기, `calculateddamage>0`이면 그 값, 타수는 `repeat` 변수 → X 비용이면 에너지 → 해체(DISMANTLE)는 대상 취약이면 2.
 - `energy_cost`: `EnergyCost.GetResolved()` int.
 - `card_keywords`: `CardKeyword` 이름 목록(없으면 생략).
@@ -86,6 +88,8 @@
 
 적 의도(`battle.enemies[].intents[]`, `AttackIntent` 하위 전부: Attack·DeathBlow): `hits > 1`이면 `damage`(타당 `GetSingleDamage`)·`hits`(`Repeats`)·`total_damage`(`GetTotalDamage`), 아니면 `damage`(`GetTotalDamage`)만. 대상 목록은 sts2-cli처럼 `CombatManager.DebugOnlyGetState().PlayerCreatures`.
 
+전투 중 손패 선택(`hand_select`): `min_select`(= min(`prefs.MinSelect`, 후보 수), sts2-cli 선택기와 같은 보정), `max_select`(`prefs.MaxSelect`), `purpose`(sts2-cli와 같은 규칙: `card_selection.TO_X` → `x`, 아니면 업그레이드 모드 `upgrade`, 그 밖 `hand`), `prompt_key`("table.ENTRY"), `cancelable`, `require_manual_confirmation`. `cards[]`·`selected_cards[]`에 `card_uid`(NetCombatCardDb 전투 카드 id)·`hand_index`(`player.hand` 위치, 선택 중 고정)·`id`. `selected_cards`는 게임 `_selectedCards` 목록(업그레이드 미리보기 칸 포함)에서 만든다. 남은 차이: 시뮬레이터는 후보가 1장이고 min≥1이면 수동 확정 여부와 상관없이 자동 선택하지만 게임은 `RequireManualConfirmation`이면 화면을 띄운다.
+
 지도(`map.next_options[]`): `sim_order`(int 또는 null) — 위 "지도 선택" 참고.
 
 파워(플레이어·적·Osty `status[]`): `raw_amount` = `PowerModel.Amount`(sts2-cli `amount`와 같은 값). 기존 `amount`(= `DisplayAmount`)는 그대로.
@@ -94,4 +98,5 @@
 
 - 실제 게임에서 `stats`/`damage_by_target` 값이 같은 상황의 시뮬레이터 값과 일치하는지(힘·취약·종이 개구리·해체·소용돌이로 대조 필요).
 - 상태 요청 뒤 손패 카드 미리보기를 기본값으로 되돌려도 화면 표시·카드 사용에 문제가 없는지(PreviewValue는 표시 전용이고 NCard가 다음 갱신 때 다시 계산하지만, 렌더된 문구가 바뀌는 순간은 육안 확인 필요).
+- hand_select의 `min_select`/`max_select`/`prompt_key`가 실제 카드(정화류 "최대 N장", 소멸·버리기·무장)에서 sts2-cli 값과 같은지, 선택 중 고른 카드가 손패 더미에 남아 `hand_index`가 고정되는지.
 - 의도 라벨이 한국어 설정에서도 `12x2` 형식으로 남는지(어댑터가 새 `damage`/`hits` 키로 바꾸기 전까지의 전제).
