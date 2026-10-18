@@ -121,7 +121,17 @@ Always present at the top level (except `menu`). Contains everything about the l
   "can_play": true,
   "unplayable_reason": null, // e.g. "NotEnoughEnergy", "Unplayable", null if playable
   "is_upgraded": false,
-  "keywords": [ /* Keyword Objects */ ]
+  "keywords": [ /* Keyword Objects */ ],
+  // --- sts2-cli parity fields (same computation as the headless simulator) ---
+  "stats": { "damage": 6 },  // lowercase DynamicVar name -> resolved preview value (Strength, Weak, Frail, ...); null if none
+  "damage_by_target": [      // Attack cards targeting AnyEnemy/AllEnemies only; one row per alive enemy
+    { "target_index": 0, "enemy_id": "JAW_WORM_0", "name": "Jaw Worm", "damage": 9 },
+    { "target_index": 1, "enemy_id": "JAW_WORM_1", "name": "Jaw Worm", "damage": 6, "repeat": 2, "total_damage": 12 }
+    // target_index = ordinal among alive enemies (battle.enemies order), enemy_id = entity_id;
+    // repeat/total_damage only when the card hits more than once against that target
+  ],
+  "energy_cost": 1,          // Resolved energy cost as int (X-cost: captured X value)
+  "card_keywords": ["Exhaust"] // Raw CardKeyword names, omitted if none
 }
 ```
 
@@ -129,6 +139,8 @@ Always present at the top level (except `menu`). Contains everything about the l
 
 ```jsonc
 {
+  "id": "STRIKE_R",
+  "is_upgraded": false,
   "name": "Strike",
   "cost": "1",               // Energy cost as string ("X" for X-cost)
   "star_cost": null,          // Regent star cost as string, null if N/A
