@@ -125,6 +125,8 @@ public static partial class McpMod
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(ProcessMainThreadQueue));
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(OverlayTick));
+            InitLobbyAutoReady();
+            tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(LobbyAutoReadyTick));
 
             string? clientIdArg = null;
             try { clientIdArg = MegaCrit.Sts2.Core.Helpers.CommandLineHelper.GetValue("clientId"); }
@@ -256,6 +258,11 @@ public static partial class McpMod
                     ["pid"] = System.Environment.ProcessId,
                     ["mp_port_build"] = true
                 });
+            }
+            else if (path == "/api/v1/lobby")
+            {
+                // The lobby is not a run: handled before the run guards.
+                HandleLobby(request, response);
             }
             else if (path == "/api/v1/singleplayer")
             {
