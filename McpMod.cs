@@ -34,13 +34,13 @@ public static partial class McpMod
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    private static int LoadPort()
+    private static int? LoadConfigPort()
     {
         try
         {
             string? modDir = Path.GetDirectoryName(
                 System.Reflection.Assembly.GetExecutingAssembly().Location);
-            if (modDir == null) return DefaultPort;
+            if (modDir == null) return null;
 
             string configPath = Path.Combine(modDir, ConfigFileName);
             if (!File.Exists(configPath))
@@ -56,7 +56,7 @@ public static partial class McpMod
                 {
                     GD.Print($"[STS2 MCP] No config found at {configPath}; using default port {DefaultPort}");
                 }
-                return DefaultPort;
+                return null;
             }
 
             string content = File.ReadAllText(configPath);
@@ -69,13 +69,49 @@ public static partial class McpMod
             }
 
             GD.PrintErr($"[STS2 MCP] Invalid or missing 'port' in {configPath}, using default {DefaultPort}");
-            return DefaultPort;
+            return null;
         }
         catch (Exception ex)
         {
             GD.PrintErr($"[STS2 MCP] Failed to load config: {ex.Message}, using default port {DefaultPort}");
-            return DefaultPort;
+            return null;
         }
+    }
+
+    internal static int CurrentPort { get; private set; } = DefaultPort;
+    internal static string? ClientId { get; private set; }
+    internal static string PortSource { get; private set; } = "default";
+
+    // Port precedence: STS2MCP_PORT env > --clientId N (15526 + N/1000) > config file > default.
+    internal static (int port, string source, string? warning) ResolvePort(
+        string? envPort, string? clientIdArg, int? configPort)
+    {
+        var warnings = new List<string>();
+
+        if (!string.IsNullOrEmpty(envPort))
+        {
+            if (int.TryParse(envPort, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out int ep) && ep is >= 1 and <= 65535)
+                return (ep, "env", null);
+            warnings.Add($"Invalid STS2MCP_PORT '{envPort}' (expected 1..65535), ignored");
+        }
+
+        if (clientIdArg != null)
+        {
+            if (long.TryParse(clientIdArg, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out long n)
+                && n > 0 && n % 1000 == 0 && n / 1000 <= 1000)
+            {
+                return ((int)(DefaultPort + n / 1000), $"clientId={n}",
+                    warnings.Count > 0 ? string.Join("; ", warnings) : null);
+            }
+            warnings.Add($"--clientId '{clientIdArg}' is not a positive multiple of 1000 with N/1000 <= 1000, not used for port");
+        }
+
+        string? warn = warnings.Count > 0 ? string.Join("; ", warnings) : null;
+        if (configPort is >= 1 and <= 65535)
+            return (configPort.Value, "config", warn);
+        return (DefaultPort, "default", warn);
     }
 
     public static void Initialize()
@@ -90,12 +126,29 @@ public static partial class McpMod
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(ProcessMainThreadQueue));
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(OverlayTick));
 
-            int port = LoadPort();
+            string? clientIdArg = null;
+            try { clientIdArg = MegaCrit.Sts2.Core.Helpers.CommandLineHelper.GetValue("clientId"); }
+            catch (Exception ex) { GD.PrintErr($"[STS2 MCP] Failed to read --clientId: {ex.Message}"); }
+            var (port, portSource, portWarning) = ResolvePort(
+                System.Environment.GetEnvironmentVariable("STS2MCP_PORT"), clientIdArg, LoadConfigPort());
+            CurrentPort = port;
+            ClientId = clientIdArg;
+            PortSource = portSource;
+            if (portWarning != null)
+                GD.PrintErr($"[STS2 MCP] {portWarning}");
 
             _listener = new HttpListener();
             _listener.Prefixes.Add($"http://localhost:{port}/");
             _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
-            _listener.Start();
+            try
+            {
+                _listener.Start();
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[STS2 MCP] Failed to bind port {port}: {ex}");
+                throw;
+            }
 
             _serverThread = new Thread(ServerLoop)
             {
@@ -104,7 +157,7 @@ public static partial class McpMod
             };
             _serverThread.Start();
 
-            GD.Print($"[STS2 MCP] v{Version} server started on http://localhost:{port}/");
+            GD.Print($"[STS2 MCP] v{Version} (mp-port) server started on http://localhost:{port}/ (port source: {portSource})");
         }
         catch (Exception ex)
         {
@@ -194,7 +247,15 @@ public static partial class McpMod
 
             if (path == "/")
             {
-                SendJson(response, new { message = $"Hello from STS2 MCP v{Version}", status = "ok" });
+                SendJson(response, new Dictionary<string, object?>
+                {
+                    ["message"] = $"Hello from STS2 MCP v{Version}",
+                    ["status"] = "ok",
+                    ["port"] = CurrentPort,
+                    ["client_id"] = ClientId,
+                    ["pid"] = System.Environment.ProcessId,
+                    ["mp_port_build"] = true
+                });
             }
             else if (path == "/api/v1/singleplayer")
             {
