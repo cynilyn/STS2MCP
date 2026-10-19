@@ -37,6 +37,7 @@ public static partial class McpMod
     private static string? _arLastError;
     private static string? _arDetail;
     private static bool _arManualUnready;
+    private static StartRunLobby? _arManualUnreadyLobby;
     private static StartRunLobby? _arLobby;
     private static StartRunLobby? _arTutorialsLobby;
     private static StartRunLobby? _arFtueLobby;
@@ -364,6 +365,7 @@ public static partial class McpMod
             {
                 lobby.SetReady(false);
                 _arManualUnready = true;
+                _arManualUnreadyLobby = lobby;
                 return (200, new Dictionary<string, object?>
                 {
                     ["status"] = "ok",
@@ -389,13 +391,17 @@ public static partial class McpMod
         _arDetail = detail;
     }
 
-    private static void ArResetToIdle(string why)
+    private static void ArResetToIdle(string why, StartRunLobby? newLobby = null)
     {
         _arLobby = null;
         _arAttempts = 0;
         _arWaitUntil = 0;
         _arDoneUnreadySince = 0;
-        _arManualUnready = false;
+        if (newLobby == null || !ReferenceEquals(_arManualUnreadyLobby, newLobby))
+        {
+            _arManualUnready = false;
+            _arManualUnreadyLobby = null;
+        }
         _arLastError = null;
         ArSetState("idle", why);
     }
@@ -419,7 +425,11 @@ public static partial class McpMod
     private static void AutoReadyStep(ulong now)
     {
         // During a run the lobby screen is gone; keep the state (e.g. done) untouched.
-        if (SafeRunInProgress()) return;
+        if (SafeRunInProgress())
+        {
+            if (_arState == "verifying_ready") ArEnterDone();
+            return;
+        }
 
         var tree = Engine.GetMainLoop() as SceneTree;
         string? reason = FindValidLobby(tree, false, out var screen);
@@ -428,7 +438,7 @@ public static partial class McpMod
         if (_arState != "idle" && _arState != "disabled")
         {
             if (screen == null || lobby == null || !ReferenceEquals(lobby, _arLobby))
-                ArResetToIdle(reason ?? "lobby changed");
+                ArResetToIdle(reason ?? "lobby changed", lobby);
         }
 
         if (screen == null || lobby == null || tree?.Root == null)
@@ -445,7 +455,11 @@ public static partial class McpMod
             {
                 _arLobby = lobby;
                 _arAttempts = 0;
-                _arManualUnready = false;
+                if (!ReferenceEquals(_arManualUnreadyLobby, lobby))
+                {
+                    _arManualUnready = false;
+                    _arManualUnreadyLobby = null;
+                }
                 _arLastError = null;
                 if (_arDisableTutorials && !ReferenceEquals(_arTutorialsLobby, lobby))
                 {
@@ -532,6 +546,11 @@ public static partial class McpMod
             {
                 if (_arManualUnready) { _arDetail = "manual_unready"; break; }
                 if (lobby.LocalPlayer.isReady) { ArEnterDone(); break; }
+                if (lobby.Players.Count < _arMinPlayers)
+                {
+                    ArSetState("waiting_roster", "roster shrank before ready");
+                    break;
+                }
                 if (_arAttempts >= AutoReadyMaxAttempts)
                 {
                     ArFail($"attempts exhausted ({AutoReadyMaxAttempts})");
