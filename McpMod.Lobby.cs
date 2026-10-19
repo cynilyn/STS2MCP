@@ -39,6 +39,7 @@ public static partial class McpMod
     private static bool _arManualUnready;
     private static StartRunLobby? _arLobby;
     private static StartRunLobby? _arTutorialsLobby;
+    private static StartRunLobby? _arFtueLobby;
     private static ulong _arLastRun;
     private static ulong _arWaitUntil;
     private static ulong _arDoneUnreadySince;
@@ -417,6 +418,9 @@ public static partial class McpMod
 
     private static void AutoReadyStep(ulong now)
     {
+        // During a run the lobby screen is gone; keep the state (e.g. done) untouched.
+        if (SafeRunInProgress()) return;
+
         var tree = Engine.GetMainLoop() as SceneTree;
         string? reason = FindValidLobby(tree, false, out var screen);
         var lobby = reason == null ? screen?.Lobby : null;
@@ -457,6 +461,10 @@ public static partial class McpMod
                         _arLastError = $"disable tutorials failed: {ex.Message}";
                         GD.PrintErr($"[STS2 MCP] auto-ready: {_arLastError}");
                     }
+                }
+                if (!ReferenceEquals(_arFtueLobby, lobby))
+                {
+                    _arFtueLobby = lobby;
                     if (IsAnyFtueVisible(tree.Root))
                         _arLastError = AutoDismissFtue(tree.Root);
                 }
