@@ -42,6 +42,49 @@ Every response (except `menu`) includes these top-level fields alongside the sta
 }
 ```
 
+### Combat Sync Fields (any state while combat is in progress)
+
+Added to every GET response (single- and multiplayer endpoints) whenever `CombatManager.IsInProgress`,
+whatever the `state_type` (`monster`/`elite`/`boss`, `hand_select`, `card_select` and other overlays opened mid-combat).
+Read on the main thread in the same frame as the rest of the state.
+
+```jsonc
+{
+  "action_queue_busy": false,  // executor_running || pending_actions > 0 ||
+                               //   (card_or_potion_effect_running && !awaiting_player_choice).
+                               // true = the game is still resolving actions; the rest of the state may be stale
+                               // within a moment (energy, hand, draws). Wait until false before deciding.
+  "state_version": 1234,       // Monotonic counter (never resets while the game runs), +1 on every
+                               // ActionExecutor.BeforeActionExecuted / AfterActionExecuted and every
+                               // CombatManager.TurnStarted / TurnEnded / PlayerActionsDisabledChanged.
+                               // Starts counting at the first state request of a run. Compare before/after a command
+                               // to know an action actually ran (a PlayCardAction canceled during a player choice
+                               // does not bump it).
+  "action_queue": {
+    "executor_running": false,       // ActionExecutor.IsRunning: the executor loop is processing ready actions
+                                     // (each action is awaited to completion, including its animations/draws)
+    "current_action": null,          // Type name of ActionExecutor.CurrentlyRunningAction, e.g. "PlayCardAction"
+    "pending_actions": 0,            // Player queues whose front action is executing or can run now
+                                     // (same rules as ActionQueueSet.GetReadyAction: front non-canceled action in
+                                     // WaitingForExecution/ReadyToResumeExecuting, not NonCombat, not a
+                                     // play-phase-only action on a paused queue). Actions stuck behind a player
+                                     // choice are not counted.
+    "queued_actions": 0,             // All non-canceled, unfinished actions in all player queues (informational)
+    "awaiting_player_choice": false, // Some queued action is paused in GatheringPlayerChoice (hand/card select open)
+    "card_or_potion_effect_running": false, // CombatManager.IsExecutingCardOrPotionEffect(local player),
+                                            // incl. nested auto-plays; stays true while that effect waits on a
+                                            // hand/card select, hence not counted in busy then
+    "executor_paused": false,        // ActionExecutor.IsPaused
+    "combat_paused": false,          // CombatManager.IsPaused
+    "player_actions_disabled": false,// CombatManager.PlayerActionsDisabled
+    "hand_in_card_play": false       // NPlayerHand.InCardPlay (a UI drag/targeting is in progress)
+  }
+}
+```
+
+A safe "ready to act" check for a bot: `battle.is_play_phase && !action_queue_busy` (for a selection screen:
+`!action_queue_busy && action_queue.awaiting_player_choice`). If `action_queue_error` is present, the fields could not be read.
+
 ### Player Object
 
 Always present at the top level (except `menu`). Contains everything about the local player.
@@ -121,7 +164,17 @@ Always present at the top level (except `menu`). Contains everything about the l
   "can_play": true,
   "unplayable_reason": null, // e.g. "NotEnoughEnergy", "Unplayable", null if playable
   "is_upgraded": false,
-  "keywords": [ /* Keyword Objects */ ]
+  "keywords": [ /* Keyword Objects */ ],
+  // --- sts2-cli parity fields (same computation as the headless simulator) ---
+  "stats": { "damage": 6 },  // lowercase DynamicVar name -> resolved preview value (Strength, Weak, Frail, ...); null if none
+  "damage_by_target": [      // Attack cards targeting AnyEnemy/AllEnemies only; one row per alive enemy
+    { "target_index": 0, "enemy_id": "JAW_WORM_0", "name": "Jaw Worm", "damage": 9 },
+    { "target_index": 1, "enemy_id": "JAW_WORM_1", "name": "Jaw Worm", "damage": 6, "repeat": 2, "total_damage": 12 }
+    // target_index = ordinal among alive enemies (battle.enemies order), enemy_id = entity_id;
+    // repeat/total_damage only when the card hits more than once against that target
+  ],
+  "energy_cost": 1,          // Resolved energy cost as int (X-cost: captured X value)
+  "card_keywords": ["Exhaust"] // Raw CardKeyword names, omitted if none
 }
 ```
 
@@ -129,6 +182,8 @@ Always present at the top level (except `menu`). Contains everything about the l
 
 ```jsonc
 {
+  "id": "STRIKE_R",
+  "is_upgraded": false,
   "name": "Strike",
   "cost": "1",               // Energy cost as string ("X" for X-cost)
   "star_cost": null,          // Regent star cost as string, null if N/A
@@ -157,7 +212,8 @@ Used for both player `status` and enemy `status`.
 {
   "id": "STRENGTH",
   "name": "Strength",
-  "amount": 3,
+  "amount": 3,              // Displayed amount (PowerModel.DisplayAmount)
+  "raw_amount": 3,          // PowerModel.Amount, the value sts2-cli reports as `amount` (differs for e.g. Slow, Hardened Shell)
   "type": "Buff",            // "Buff" or "Debuff"
   "description": "Increases attack damage by 3.",
   "keywords": [ /* Keyword Objects */ ]
@@ -355,7 +411,16 @@ Run state or room type not recognized.
             "type": "Attack",          // Attack, Defend, Buff, Debuff, Sleep, etc.
             "label": "11",             // Damage number or short label
             "title": "Attack",         // Hover tip title
-            "description": "Deals 11 damage."  // Hover tip description
+            "description": "Deals 11 damage.", // Hover tip description
+            // Attack intents only (Attack, DeathBlow; same values/keys as sts2-cli):
+            "damage": 11               // Total damage for single-hit attacks
+          },
+          {
+            "type": "Attack",
+            "label": "5x3",
+            "damage": 5,               // Multi-hit: per-hit damage
+            "hits": 3,                 // Present only when hits > 1
+            "total_damage": 15         // Present only when hits > 1
           }
         ]
       }
@@ -376,9 +441,16 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
   "hand_select": {
     "mode": "simple_select",     // "simple_select" or "upgrade_select"
     "prompt": "Select a card to Exhaust.",
-    "cards": [
+    // From the game's CardSelectorPrefs (same names/semantics as sts2-cli card_select):
+    "min_select": 0,             // min(prefs.MinSelect, number of options incl. already-selected)
+    "max_select": 2,             // prefs.MaxSelect ("up to N" = min 0, max N)
+    "purpose": "exhaust",        // "card_selection.TO_X" prompt -> "x"; else "upgrade" (upgrade_select) or "hand"
+    "prompt_key": "card_selection.TO_EXHAUST", // Prompt LocString "table.ENTRY", language independent; null if none
+    "cancelable": false,         // prefs.Cancelable
+    "require_manual_confirmation": true, // prefs.RequireManualConfirmation
+    "cards": [                   // Remaining selectable cards; re-indexed after each pick
       {
-        "index": 0,
+        "index": 0,              // Use this with combat_select_card
         "id": "STRIKE_R",
         "name": "Strike",
         "type": "Attack",
@@ -386,11 +458,13 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
         "star_cost": null,       // Regent star cost as string, null if N/A
         "description": "Deal 6 damage.",
         "is_upgraded": false,
-        "keywords": [ /* Keyword Objects */ ]
+        "keywords": [ /* Keyword Objects */ ],
+        "card_uid": 17,          // Per-instance combat card id (NetCombatCardDb); unique even for duplicates
+        "hand_index": 3          // Index in player.hand; stable for the whole selection
       }
     ],
-    "selected_cards": [          // Only present if cards have been selected
-      { "index": 0, "name": "Defend" }
+    "selected_cards": [          // Only present if cards have been selected (game's selection order)
+      { "index": 0, "name": "Defend", "id": "DEFEND_R", "card_uid": 12, "hand_index": 1 }
     ],
     "can_confirm": false
   },
@@ -484,6 +558,9 @@ Pick one card to add to your deck. Appears after claiming a card reward, or dire
         "index": 0,
         "col": 2, "row": 3,
         "type": "RestSite",
+        "sim_order": 1,          // Index of this node in sts2-cli's map_select `choices` (current node's Children
+                                 // enumeration order; with no current coord: [start, ...start.Children]).
+                                 // next_options itself stays sorted by column. null if not in that list.
         "leads_to": [            // 1-level lookahead (children)
           { "col": 1, "row": 4, "type": "Elite" },
           { "col": 3, "row": 4, "type": "Shop" }

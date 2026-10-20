@@ -1,0 +1,115 @@
+# 시뮬레이터(sts2-cli) ↔ STS2MCP 관측 대응표
+
+봇 인코더(`sts2_bot/rl/encoding.py`)가 읽는 시뮬레이터 필드를 MCP 모드가 어떻게 주는지 정리한다.
+어댑터는 `sts2_bot/rl/mcp_adapter.py`(`combat_state()`), 시뮬레이터는 `sts2-cli/src/Sts2Headless/RunSimulator.cs`(`CombatPlayState`).
+
+표기: **동일** = 같은 게임 API로 같은 값 / **근사** = 어댑터가 다른 필드에서 추정 / **없음** = 모드가 주지 않음.
+"(이 브랜치)" = `feat/sim-parity-stats`에서 모드에 추가한 필드(어댑터는 아직 안 씀).
+
+## 손패 카드
+
+| 시뮬레이터 필드 | 인코더 사용처 | 모드 | 상태 |
+|---|---|---|---|
+| `id` (`CARD.X`) | 카드 임베딩 | `id` = `Id.Entry`, 어댑터가 `CARD.` 접두 | 동일 |
+| `type`, `target_type` | card_features, 마스크 | 같은 enum 문자열 | 동일 |
+| `cost` (int, `GetResolved()`) | f[0] 비용, f[13] X 여부, 마스크 | `cost`는 문자열("X" 포함). 어댑터가 숫자로 바꾸고 "X"는 문자열로 둠 | **다름**: 시뮬레이터는 X 카드도 int(포착된 X, 손패에선 보통 0)라 is_x=0, 어댑터는 is_x=1. → `energy_cost`(이 브랜치)로 해소 |
+| `can_play` | f[1], 마스크, emax | 예전: `unplayableReason == None` | 동일(이 브랜치에서 `CanPlay()` 반환값 + 시뮬레이터의 두 덮어쓰기(살아 있는 적 없음, 별 부족)로 맞춤) |
+| `keywords` (CardKeyword 이름) | f[9..12] | 현지화된 hover tip 이름 → 어댑터가 card_keywords 표로 역변환 | 근사(표에 없는 이름은 누락). → `card_keywords`(이 브랜치) |
+| `upgraded` | v4 효과 벡터 | `is_upgraded` → 어댑터가 `upgraded`로 | 동일 |
+| `rarity` | v4 효과 벡터 | 모드는 보냄, **어댑터가 안 옮김** | 어댑터 누락(v4만 영향) |
+| `stats` {var: PreviewValue} | f[6..7], hand_stats(37+2), v4 | 예전: 설명 문장 정규식(damage/block/cards/취약/약화/힘/hploss 7개) | 근사 → `stats`(이 브랜치, 시뮬레이터와 같은 계산) |
+| `damage_by_target` | hand_target_dmg, hand_kill, enemy_max_dmg, reflect | 예전: 설명 피해 × 취약 1.5, 타수는 문구 정규식 | 근사(취약 외 보정·종이 개구리·Slow·해체·calculateddamage 미반영) → `damage_by_target`(이 브랜치) |
+| `description` | `_card_hits` 폴백(대상 행 없는 무작위 공격의 타수) | 게임 언어로 서식 적용된 문장. 시뮬레이터는 영문 원문 | 근사(한국어면 `_TWICE_RE` 불일치, 무작위 대상 공격의 반사 피해만 영향) |
+
+## 적
+
+| 시뮬레이터 필드 | 인코더 사용처 | 모드 | 상태 |
+|---|---|---|---|
+| 순서·`index` | 슬롯, target_index | 살아 있는 적만, 같은 순서 | 동일 |
+| `id` | 적 임베딩 | `entity_id`에서 `_N` 제거 | 동일 |
+| `hp`, `max_hp`, `block` | enemy_features, hand_kill | 같은 필드 | 동일 |
+| `intents[].damage/hits/total_damage` | enemy f[5], threat, turn_obs | 예전: `label` 문자열("12x2")을 정규식으로(어댑터가 `type == "Attack"`만 파싱 → DeathBlow 피해 누락) | 동일 → `damage`/`hits`/`total_damage`(이 브랜치, sts2-cli와 같은 키·계산, DeathBlow 포함). 어댑터가 그대로 넘기면 됨 |
+| `intends_attack` | enemy f[4] | Attack 의도 유무로 추정 | 근사(`Monster.IntendsToAttack`, DeathBlow 포함 여부 다름) |
+| `powers[].id/amount` | enemy_pw_ids/amt, 반사, 측면 | `status`: `IsVisible`만, `amount` = `DisplayAmount`, `raw_amount` = `Amount`(이 브랜치) | `amount`는 `DisplayAmount`를 재정의한 파워 13종(SLOW는 Amount×10, HARDENED_SHELL은 남은 양 등)에서 다름 → `raw_amount`를 쓰면 수치 동일. 남은 차이는 숨은 파워 AMBERGRIS 1종(목록에서 빠짐) |
+| `side` | turn_obs | 없음 | 인코더가 BACK_ATTACK_* 파워로 대신 판정 → 동일 효과 |
+
+## 플레이어·전투
+
+| 시뮬레이터 필드 | 인코더 사용처 | 모드 | 상태 |
+|---|---|---|---|
+| `player.hp/max_hp/block` | player_features, threat | 같은 필드 | 동일 |
+| `energy`, `max_energy` | player f[4..5], 마스크 | 같은 `PlayerCombatState` | 동일 |
+| `round` | player f[6] | `battle.round` = `RoundNumber` | 동일 |
+| `draw/discard_pile_count` | player f[7..8] | 같은 필드 | 동일 |
+| `draw/discard/exhaust_pile` (정렬 ID, "+"=강화) | 더미 장수 벡터, v4 더미 효과 | 예전: 현지화 이름만 → 이름→ID 역변환(동명 카드는 캐릭터 접미사로 추정) | 근사 → 더미 카드에 `id`·`is_upgraded`(이 브랜치). 어댑터 `card_ids`가 이미 `id`를 우선 사용 |
+| `player_powers` | player_pw_ids/amt, turn_obs(SURROUNDED) | `status` (보이는 것만, `amount`=DisplayAmount, `raw_amount`=Amount(이 브랜치)) | `raw_amount`로 수치 동일, 숨은 파워(AMBERGRIS)만 차이 |
+| `facing` | turn_obs | 없음 | **없음**: 황제 게 전투에서 turn_obs가 항상 0 (facing 관측을 켠 모델만 영향) |
+| `player.potions` (보유 전부, index=보유 순번) | potion_ids, 포션 마스크, potion_effect | 슬롯 순서, 어댑터가 `can_use_in_combat` 아닌 것 제외 | 근사(전투 불가 포션이 시뮬레이터엔 보임, 칸 순서 다를 수 있음). 효과 vars는 카탈로그의 정적 값 |
+| `player.relics[].id` | 유물 multi-hot | 같은 `Id.Entry` | 동일 |
+| `context.act`, `room_type` | context | `run.act`, `state_type` 매핑 | 동일 |
+| `orbs[].type/passive/evoke`, `orb_slots` | orb_ids, orb_feat | `orbs[].id`("LIGHTNING_ORB")·`name`(현지화)·`passive_val`·`evoke_val` | **어댑터 불일치**: 인코더는 `type`(없으면 `name`)·`passive`/`evoke`를 읽음 → 수치는 항상 0, 어휘는 게임 언어가 영어일 때만 맞음(한국어면 0) |
+| `stars` | context | 별 카운터 표시 조건이 다름(시뮬레이터: 리젠트면 항상) | 거의 동일 |
+| `osty` {alive,hp,max_hp,block} | context | 모드는 `pets[]`(Osty)로 보냄, 어댑터는 `osty`만 복사 | **어댑터 불일치**: 네크로바인더 Osty 특징 전부 0 |
+| `min_select`/`max_select`/`purpose`/`prompt` (card_select) | 선택 마스크, player f[11], select_ctx·select_text | 예전: 없음 → 어댑터가 max=1로 추정해 첫 장 뒤 바로 확정. `prompt`는 현지화 문장 | → `min_select`·`max_select`·`purpose`·`prompt_key`(이 브랜치, 게임 `CardSelectorPrefs`에서). 어댑터가 `prompt_key`를 시뮬레이터 `prompt`로 넘기면 됨 |
+| card_select 후보 목록(선택 내내 고정, `picks`로 누적) | 선택 마스크 | 모드는 고른 카드를 목록에서 빼고 다시 번호를 매김 | → 후보·선택 카드에 `card_uid`·`hand_index`(이 브랜치). `hand_index`로 정렬한 (선택됨 + 남은 후보)가 시뮬레이터 후보 순서(손패 순서)와 같고, `card_uid`로 같은 카드 중복도 구분 |
+| card_select 후보의 `stats`(BaseValue)·`cost`(int)·`keywords`(enum) | card_features, hand_stats | hand_select 후보에는 없음 | 없음(남은 차이) |
+
+## 지도 선택(비전투 모델)
+
+| 시뮬레이터 필드 | 모드 | 상태 |
+|---|---|---|
+| `map_select.choices` 순서 = 현재 노드 `Children` 열거 순서(생성 순서). 현재 좌표가 없으면 `[시작 노드, 시작 노드의 Children...]`, 좌표가 무효면 시작 노드의 Children | `map.next_options`는 열(col) 순 정렬 | 실제 결정 258개 중 88개에서 순서가 다름 → 각 `next_options` 항목에 `sim_order`(이 브랜치) |
+
+`sim_order`는 그 노드가 sts2-cli `choices`에서 몇 번째인지(같은 분기 규칙으로 계산, 없으면 null). 봇은 `next_options`를 `sim_order`로 정렬해 쓰고, 명령은 기존 `index`로 보낸다. 시작 노드가 0번을 차지하는 경우 자식은 1부터 시작하므로 절대값이 아니라 정렬 키로 쓴다. `Children`은 `HashSet<MapPoint>`다. .NET HashSet의 열거 순서는 내부 항목 배열 순서(삽입 순서, 제거 뒤에는 빈 칸 재사용)라 해시값과 무관하고, 같은 시드·같은 DLL의 같은 추가/제거 과정이면 게임과 시뮬레이터 순서가 같다(실제 게임 대조는 아직 안 함).
+
+## 행동 처리 중 여부(실제 게임에만 있는 문제)
+
+시뮬레이터는 명령 하나를 끝까지 처리한 뒤 다음 결정 상태를 돌려주므로 "처리 중" 상태가 없다. 실제 게임은 행동 큐가 프레임마다 돌아서, 명령 직후 상태를 읽으면 아직 반영 전일 수 있다(증류된 혼돈의 자동 사용 3장, 털어내기의 뽑기가 약 1.8초 뒤 도착, 에너지 0으로 보고 턴 종료).
+이 브랜치에서 전투 중 모든 응답 최상위에 `action_queue_busy`·`state_version`·`action_queue{...}`를 넣었다(정확한 의미는 `raw-full.md` "Combat Sync Fields").
+
+- `action_queue_busy` = 행동 실행기 루프가 도는 중(`ActionExecutor.IsRunning`) 또는 플레이어 큐의 맨 앞 행동이 실행 중이거나 지금 실행될 수 있음(게임 `GetReadyAction`과 같은 규칙) 또는 카드/포션 효과 본문 실행 중(`IsExecutingCardOrPotionEffect`, 자동 사용 포함, 단 선택 대기 중이면 제외 — 선택을 기다리는 효과도 깊이가 남아 있으므로). 플레이어 선택을 기다리며 멈춘 행동과 그 뒤에 막혀 있는 행동은 세지 않는다(`awaiting_player_choice`로 따로). 그래서 선택 화면에서는 busy가 false가 된다.
+- 덮는 것: 카드·포션 사용(뽑기·섞기·자동 사용·연쇄 훅 포함, 모두 행동 안에서 await됨), 턴 종료 행동, 선택 뒤 재개. 싱글플레이에서 `play_card`/`use_potion`은 POST 처리 중에 바로 큐에 들어가고 실행기가 같은 호출 안에서 시작되므로, POST 뒤 첫 GET부터 busy가 보인다.
+- 덮지 않는 것: 큐 밖에서 도는 턴 전환(플레이어 턴 시작의 에너지·뽑기, 적 턴)은 busy가 아니라 기존 `battle.is_play_phase`(턴 단계가 `Play`가 된 뒤에만 true)로 판단해야 한다. 행동이 끝난 뒤의 순수 연출(카드가 더미로 날아가는 트윈)은 상태에 영향이 없어 포함하지 않는다. 멀티플레이 클라이언트의 요청 전송 지연, 적 턴 중 요청해 플레이어 턴까지 미뤄진 행동은 큐에 없어 보이지 않는다.
+- 권장 판단: 전투 결정은 `battle.is_play_phase && !action_queue_busy`일 때만, 명령 뒤에는 `state_version`이 바뀌고 busy가 false가 될 때까지 기다린다.
+
+## 결정에 영향이 큰 남은 차이 (우선순위)
+
+1. **디펙트 구체 수치 0(한국어면 종류도 0)** — 어댑터에서 `type = id.removesuffix("_ORB").title()`, `passive = int(passive_val)`, `evoke = int(evoke_val)`로 옮기면 해결(모드 수정 불필요). 디펙트 전투 내내 관측이 틀림.
+2. **네크로바인더 Osty 0** — 어댑터에서 `pets[0]`(id OSTY)를 `osty`로 옮기면 해결. 또는 모드가 시뮬레이터처럼 최상위 `osty`도 보냄.
+3. **카드 수치·대상별 피해** — 이 브랜치의 `stats`·`damage_by_target`를 어댑터가 그대로 쓰도록 바꾸면 해소(정규식·취약 1.5 근사 제거). 처치 판정(hand_kill)과 전체 공격 가치에 직접 영향.
+4. **X 비용 카드 표시(f[0], f[13])** — 어댑터가 `cost`를 `energy_cost`로 쓰면 시뮬레이터와 같아짐. 지금은 학습 때 본 적 없는 is_x=1 입력.
+5. **의도 피해(DeathBlow 누락)** — 이 브랜치에서 모드가 의도에 `damage`/`hits`/`total_damage`를 직접 넣음. 어댑터가 라벨 정규식 대신 이 키를 쓰면 해소. 위협(threat) 특징에 직접 영향.
+6. **파워 수치 차이** — 이 브랜치에서 모든 파워 항목에 `raw_amount`(= `Amount`) 추가. 어댑터 `_powers`가 `raw_amount`를 우선 쓰면 슬로우·단단한 껍질 등 13종이 맞춰짐. 숨은 파워(AMBERGRIS)까지 맞추려면 `IsVisible` 필터 없는 목록이 더 필요.
+7. **카드 키워드** — 어댑터가 `card_keywords`를 우선 사용.
+8. **rarity(v4)·potion 순서·facing·hand_select 후보의 stats/cost/keywords** — 영향 작음. facing은 모드에 `SurroundedPower.Facing` 추가로 해결.
+
+## 이 브랜치에서 모드에 추가한 필드
+
+손패 카드(`player.hand[]`):
+
+- `stats`: `{소문자 DynamicVar 이름: int PreviewValue}` — `ClearPreview → UpdateDynamicVarPreview(Normal, CurrentTarget) → 읽기 → ClearPreview`, 시뮬레이터와 같은 호출 순서(마지막 ClearPreview는 예외가 나도 돌도록 finally).
+- `damage_by_target`: 공격 카드(AnyEnemy/AllEnemies)만, 살아 있는 적마다 `{target_index, enemy_id, name, damage, repeat?, total_damage?}`. `MultiCreatureTargeting` 미리보기, `calculateddamage>0`이면 그 값, 타수는 `repeat` 변수 → X 비용이면 에너지 → 해체(DISMANTLE)는 대상 취약이면 2.
+- `energy_cost`: `EnergyCost.GetResolved()` int.
+- `card_keywords`: `CardKeyword` 이름 목록(없으면 생략).
+- `can_play`: `CanPlay()` 반환값 + 살아 있는 적 없는 AnyEnemy 카드 false + 별 부족 false(시뮬레이터와 동일).
+- `description`: 같은 Normal 미리보기 상태에서 읽는다(이전 요청의 ClearPreview 여부와 무관하게 일정).
+
+더미 카드(`draw_pile`/`discard_pile`/`exhaust_pile`): `id`, `is_upgraded`.
+
+적 의도(`battle.enemies[].intents[]`, `AttackIntent` 하위 전부: Attack·DeathBlow): `hits > 1`이면 `damage`(타당 `GetSingleDamage`)·`hits`(`Repeats`)·`total_damage`(`GetTotalDamage`), 아니면 `damage`(`GetTotalDamage`)만. 대상 목록은 sts2-cli처럼 `CombatManager.DebugOnlyGetState().PlayerCreatures`.
+
+전투 중 손패 선택(`hand_select`): `min_select`(= min(`prefs.MinSelect`, 후보 수), sts2-cli 선택기와 같은 보정), `max_select`(`prefs.MaxSelect`), `purpose`(sts2-cli와 같은 규칙: `card_selection.TO_X` → `x`, 아니면 업그레이드 모드 `upgrade`, 그 밖 `hand`), `prompt_key`("table.ENTRY"), `cancelable`, `require_manual_confirmation`. `cards[]`·`selected_cards[]`에 `card_uid`(NetCombatCardDb 전투 카드 id)·`hand_index`(`player.hand` 위치, 선택 중 고정)·`id`. `selected_cards`는 게임 `_selectedCards` 목록(업그레이드 미리보기 칸 포함)에서 만든다. 남은 차이: 시뮬레이터는 후보가 1장이고 min≥1이면 수동 확정 여부와 상관없이 자동 선택하지만 게임은 `RequireManualConfirmation`이면 화면을 띄운다.
+
+전투 중 모든 응답(최상위): `action_queue_busy`, `state_version`, `action_queue{executor_running, current_action, pending_actions, queued_actions, awaiting_player_choice, card_or_potion_effect_running, executor_paused, combat_paused, player_actions_disabled, hand_in_card_play}` — 위 "행동 처리 중 여부" 참고.
+
+지도(`map.next_options[]`): `sim_order`(int 또는 null) — 위 "지도 선택" 참고.
+
+파워(플레이어·적·Osty `status[]`): `raw_amount` = `PowerModel.Amount`(sts2-cli `amount`와 같은 값). 기존 `amount`(= `DisplayAmount`)는 그대로.
+
+## 게임 없이 확인하지 못한 것
+
+- 실제 게임에서 `stats`/`damage_by_target` 값이 같은 상황의 시뮬레이터 값과 일치하는지(힘·취약·종이 개구리·해체·소용돌이로 대조 필요).
+- 상태 요청 뒤 손패 카드 미리보기를 기본값으로 되돌려도 화면 표시·카드 사용에 문제가 없는지(PreviewValue는 표시 전용이고 NCard가 다음 갱신 때 다시 계산하지만, 렌더된 문구가 바뀌는 순간은 육안 확인 필요).
+- `action_queue_busy`가 증류된 혼돈·털어내기 같은 경우 실제로 결과가 반영될 때까지 true로 유지되는지, 턴 시작 직후 `is_play_phase`와 함께 쓰면 빈틈이 없는지.
+- hand_select의 `min_select`/`max_select`/`prompt_key`가 실제 카드(정화류 "최대 N장", 소멸·버리기·무장)에서 sts2-cli 값과 같은지, 선택 중 고른 카드가 손패 더미에 남아 `hand_index`가 고정되는지.
+- 의도 라벨이 한국어 설정에서도 `12x2` 형식으로 남는지(어댑터가 새 `damage`/`hits` 키로 바꾸기 전까지의 전제).

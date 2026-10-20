@@ -1128,11 +1128,25 @@ public static partial class McpMod
             }
 
             // Hand
+            // Alive enemies in the same order as sts2-cli (Enemies where IsAlive) and the same
+            // entity_id scheme as BuildEnemyState, so damage_by_target rows line up with both.
+            var aliveEnemiesForTargeting = CombatManager.Instance.DebugOnlyGetState()?.Enemies?
+                .Where(e => e != null && e.IsAlive).ToList() ?? new List<Creature>();
+            var aliveEnemyIds = new List<string>();
+            var targetEntityCounts = new Dictionary<string, int>();
+            foreach (var e in aliveEnemiesForTargeting)
+            {
+                string baseId = e.Monster?.Id.Entry ?? "unknown";
+                if (!targetEntityCounts.TryGetValue(baseId, out int count))
+                    count = 0;
+                targetEntityCounts[baseId] = count + 1;
+                aliveEnemyIds.Add($"{baseId}_{count}");
+            }
             var hand = new List<Dictionary<string, object?>>();
             int cardIndex = 0;
             foreach (var card in combatState.Hand.Cards)
             {
-                hand.Add(BuildCardState(card, cardIndex));
+                hand.Add(BuildCardState(card, cardIndex, combatState, aliveEnemiesForTargeting, aliveEnemyIds));
                 cardIndex++;
             }
             state["hand"] = hand;
@@ -1267,16 +1281,134 @@ public static partial class McpMod
         };
     }
 
-    private static Dictionary<string, object?> BuildCardState(CardModel card, int index)
+    private static Dictionary<string, object?> BuildCardState(CardModel card, int index,
+        PlayerCombatState pcs, List<Creature> aliveEnemiesForTargeting, List<string> aliveEnemyIds)
     {
-        card.CanPlay(out var unplayableReason, out _);
+        bool canPlay = card.CanPlay(out var unplayableReason, out _);
 
         var state = BuildCardInfo(card);
         state["index"] = index;
         state["description"] = SafeGetCardDescription(card); // hand cards use default pile
         state["target_type"] = card.TargetType.ToString();
-        state["can_play"] = unplayableReason == UnplayableReason.None;
         state["unplayable_reason"] = unplayableReason != UnplayableReason.None ? unplayableReason.ToString() : null;
+
+        // ---- Simulator parity (ported from sts2-cli RunSimulator.CombatPlayState) ----
+        // Export the *currently resolved* stat values, not the card base: refresh the
+        // DynamicVar previews (mirrors NCard.UpdateVisuals) so damage reflects Strength/Weak,
+        // block reflects Frail, calculateddamage reflects current Block, etc. ClearPreview
+        // resets PreviewValue to BaseValue, and only damage/block/calculated vars override it,
+        // so reading PreviewValue uniformly is safe.
+        // Runs on the main thread (BuildGameState is dispatched via RunOnMainThread). PreviewValue is
+        // display-only, and the card is left in base preview state afterwards (as in sts2-cli), so the
+        // already-rendered NCard text and later PlayCardAction are unaffected; NCard.UpdateVisuals
+        // re-applies its own preview on its next refresh.
+        var stats = new Dictionary<string, object?>();
+        string? previewDescription = null;
+        try
+        {
+            card.DynamicVars.ClearPreview();
+            card.UpdateDynamicVarPreview(
+                MegaCrit.Sts2.Core.Entities.Cards.CardPreviewMode.Normal,
+                card.CurrentTarget, card.DynamicVars);
+            foreach (var dv in card.DynamicVars.Values)
+            {
+                stats[dv.Name.ToLowerInvariant()] = (int)dv.PreviewValue;
+            }
+            // Read the description in the same Normal preview the UI shows, so it does not depend
+            // on whether the preview was cleared by an earlier state request.
+            previewDescription = SafeGetCardDescription(card);
+        }
+        catch { }
+        finally
+        {
+            // Restore the live card to base state. UpdateDynamicVarPreview mutates the
+            // card's preview (and for self-cost cards like Momentum Strike, leaving it in
+            // preview state corrupts the subsequent PlayCardAction — card stays in hand).
+            // In a finally (sts2-cli clears inside the try) so a throw never leaves it in preview.
+            try { card.DynamicVars.ClearPreview(); } catch { }
+        }
+        if (previewDescription != null)
+            state["description"] = previewDescription;
+
+        // Per-target resolved damage for attack cards: the scalar `stats` above use the
+        // card's CurrentTarget, but a single value can't capture target-specific modifiers
+        // (Vulnerable, Slow) or conditional hit counts (Dismantle, X-cost Whirlwind).
+        // Re-run the preview per enemy via MultiCreatureTargeting, the same path the game
+        // uses to draw multi-target previews, and read the resolved vars.
+        List<Dictionary<string, object?>>? damageByTarget = null;
+        if (card.Type == CardType.Attack && aliveEnemiesForTargeting.Count > 0
+            && (card.TargetType == TargetType.AnyEnemy || card.TargetType == TargetType.AllEnemies))
+        {
+            damageByTarget = new List<Dictionary<string, object?>>();
+            for (int ti = 0; ti < aliveEnemiesForTargeting.Count; ti++)
+            {
+                var tgt = aliveEnemiesForTargeting[ti];
+                try
+                {
+                    card.DynamicVars.ClearPreview();
+                    card.UpdateDynamicVarPreview(
+                        MegaCrit.Sts2.Core.Entities.Cards.CardPreviewMode.MultiCreatureTargeting,
+                        tgt, card.DynamicVars);
+                    var tstats = new Dictionary<string, object?>();
+                    foreach (var dv in card.DynamicVars.Values)
+                        tstats[dv.Name.ToLowerInvariant()] = (int)dv.PreviewValue;
+
+                    // Per-hit damage = calculateddamage (override cards) or damage.
+                    int? perHit = tstats.TryGetValue("calculateddamage", out var cdv) && cdv is int cdi && cdi > 0
+                        ? cdi
+                        : (tstats.TryGetValue("damage", out var dv2) && dv2 is int di ? di : (int?)null);
+                    // Hit count: explicit `repeat` var if present, else for X-cost attacks
+                    // the hit count is the current X (= available energy), e.g. Whirlwind.
+                    int repeat = tstats.TryGetValue("repeat", out var rv) && rv is int ri && ri > 0 ? ri : 1;
+                    if (repeat == 1 && card.EnergyCost?.CostsX == true && pcs != null)
+                        repeat = pcs.Energy;
+                    // Dismantle hits twice when the target is Vulnerable. The doubled hit count
+                    // lives in Dismantle.OnPlay, not in any DynamicVar preview, so it's
+                    // special-cased by card entry (same as sts2-cli).
+                    if (repeat == 1 && card.Id.Entry == "DISMANTLE" && tgt.Powers != null
+                        && tgt.Powers.Any(p => p?.Id.Entry == "VULNERABLE_POWER"))
+                        repeat = 2;
+
+                    var row = new Dictionary<string, object?>
+                    {
+                        ["target_index"] = ti,
+                        ["enemy_id"] = aliveEnemyIds[ti],
+                        ["name"] = SafeGetText(() => tgt.Monster?.Title),
+                    };
+                    if (perHit != null) row["damage"] = perHit;
+                    if (repeat > 1)
+                    {
+                        row["repeat"] = repeat;
+                        if (perHit != null) row["total_damage"] = perHit * repeat;
+                    }
+                    damageByTarget.Add(row);
+                }
+                catch { }
+                finally { try { card.DynamicVars.ClearPreview(); } catch { } }
+            }
+        }
+
+        state["stats"] = stats.Count > 0 ? stats : null;
+        if (damageByTarget != null && damageByTarget.Count > 0)
+            state["damage_by_target"] = damageByTarget;
+
+        // Resolved energy cost as an int (sts2-cli `cost`): X-cost cards report the captured X value
+        // instead of the display string "X" that `cost` carries.
+        state["energy_cost"] = card.EnergyCost?.GetResolved() ?? 0;
+        // Raw CardKeyword enum names (sts2-cli `keywords`); `keywords` here stays the localized hover tips.
+        var cardKeywords = card.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
+        if (cardKeywords?.Count > 0) state["card_keywords"] = cardKeywords;
+
+        // can_play exactly as sts2-cli: CanPlay's return value plus its two overrides.
+        // A single-target card has nothing to hit while every enemy is down (e.g. Test Subject
+        // between forms: hp 0, not alive, play phase still running) and the game never starts it.
+        if (card.TargetType == TargetType.AnyEnemy && aliveEnemiesForTargeting.Count == 0)
+            canPlay = false;
+        // Use CurrentStarCost (combat-modified); star-cost cards are unplayable without enough stars.
+        var starCost = card.CurrentStarCost;
+        if (starCost > 0 && pcs != null && pcs.Stars < starCost)
+            canPlay = false;
+        state["can_play"] = canPlay;
         return state;
     }
 
@@ -1321,6 +1453,8 @@ public static partial class McpMod
             // Pile cards only need a subset - keep it lightweight
             list.Add(new Dictionary<string, object?>
             {
+                ["id"] = card.Id.Entry,
+                ["is_upgraded"] = card.IsUpgraded,
                 ["name"] = SafeGetText(() => card.Title),
                 ["cost"] = GetCostDisplay(card),
                 ["star_cost"] = GetStarCostDisplay(card),
@@ -1378,6 +1512,28 @@ public static partial class McpMod
                     }
                 }
                 catch { /* intent label may fail for some types */ }
+                // Numeric attack damage exactly as sts2-cli CombatPlayState: any AttackIntent subtype
+                // (Single/Multi/DeathBlow). Multi-hit: per-hit `damage` + `hits` + `total_damage`;
+                // otherwise `damage` = total.
+                var playerCreatures = CombatManager.Instance.DebugOnlyGetState()?.PlayerCreatures?.ToList();
+                if (intent is AttackIntent atk && playerCreatures != null)
+                {
+                    try
+                    {
+                        var hits = atk.Repeats;
+                        if (hits > 1)
+                        {
+                            intentData["damage"] = atk.GetSingleDamage(playerCreatures, creature);
+                            intentData["hits"] = hits;
+                            intentData["total_damage"] = atk.GetTotalDamage(playerCreatures, creature);
+                        }
+                        else
+                        {
+                            intentData["damage"] = atk.GetTotalDamage(playerCreatures, creature);
+                        }
+                    }
+                    catch { }
+                }
                 intents.Add(intentData);
             }
             state["intents"] = intents;
@@ -1716,6 +1872,38 @@ public static partial class McpMod
         // Next options - read travelable state from UI nodes
         var nextOptions = new List<Dictionary<string, object?>>();
         var mapScreen = NMapScreen.Instance;
+
+        // Choice order of sts2-cli MapSelectState (node Children enumeration, not column order), so a
+        // bot trained on the simulator can see candidates in the same order via `sim_order`.
+        var simOrder = new List<MapCoord>();
+        var currentCoord = runState.CurrentMapCoord;
+        if (currentCoord.HasValue)
+        {
+            var currentPoint = map.GetPoint(currentCoord.Value);
+            if (currentPoint == null)
+            {
+                // Stale coord: sts2-cli falls back to the starting point's children.
+                var sp = map.StartingMapPoint;
+                if (sp?.Children != null)
+                    foreach (var child in sp.Children)
+                        simOrder.Add(child.coord);
+            }
+            else
+            {
+                foreach (var child in currentPoint.Children ?? Enumerable.Empty<MapPoint>())
+                    simOrder.Add(child.coord);
+            }
+        }
+        else
+        {
+            // Starting point first, then its children (same as sts2-cli).
+            var startPoint = map.StartingMapPoint;
+            simOrder.Add(startPoint.coord);
+            if (startPoint.Children != null)
+                foreach (var child in startPoint.Children)
+                    simOrder.Add(child.coord);
+        }
+
         if (mapScreen != null)
         {
             var travelable = FindAll<NMapPoint>(mapScreen)
@@ -1734,6 +1922,8 @@ public static partial class McpMod
                     ["row"] = pt.coord.row,
                     ["type"] = pt.PointType.ToString()
                 };
+                int simIndex = simOrder.FindIndex(c => c.col == pt.coord.col && c.row == pt.coord.row);
+                option["sim_order"] = simIndex >= 0 ? simIndex : (int?)null;
 
                 // 1-level lookahead
                 var children = pt.Children
@@ -2103,6 +2293,43 @@ public static partial class McpMod
     {
         var state = new Dictionary<string, object?>();
 
+        // Hand pile in model order. Selected cards leave the UI hand but stay in this pile until the
+        // selection resolves, so an index here is stable for the whole selection.
+        var handCards = LocalContext.GetMe(runState)?.PlayerCombatState?.Hand?.Cards?.ToList()
+            ?? new List<CardModel>();
+
+        // Selection limits from the game's CardSelectorPrefs (private NPlayerHand._prefs), reported like
+        // sts2-cli's card_select: min_select / max_select (min clamped to the number of options,
+        // as sts2-cli's selector does), purpose, prompt key.
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        List<CardModel>? selectedModels = null;
+        try { selectedModels = (typeof(NPlayerHand).GetField("_selectedCards", flags)?.GetValue(hand) as List<CardModel>)?.ToList(); }
+        catch { }
+        try
+        {
+            if (typeof(NPlayerHand).GetField("_prefs", flags)?.GetValue(hand)
+                is MegaCrit.Sts2.Core.CardSelection.CardSelectorPrefs prefs)
+            {
+                int optionCount = hand.ActiveHolders.Count(h => h.CardModel != null) + (selectedModels?.Count ?? 0);
+                state["min_select"] = Math.Min(prefs.MinSelect, optionCount);
+                state["max_select"] = prefs.MaxSelect;
+                state["cancelable"] = prefs.Cancelable;
+                state["require_manual_confirmation"] = prefs.RequireManualConfirmation;
+                string? promptKey = null;
+                string purpose = hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect ? "upgrade" : "hand";
+                var prompt = prefs.Prompt;
+                if (prompt != null && !prompt.IsEmpty)
+                {
+                    promptKey = prompt.LocTable + "." + prompt.LocEntryKey;
+                    if (prompt.LocTable == "card_selection" && prompt.LocEntryKey.StartsWith("TO_"))
+                        purpose = prompt.LocEntryKey.Substring(3).ToLowerInvariant();
+                }
+                state["purpose"] = purpose;
+                state["prompt_key"] = promptKey;
+            }
+        }
+        catch { }
+
         // Mode
         state["mode"] = hand.CurrentMode switch
         {
@@ -2133,14 +2360,35 @@ public static partial class McpMod
             var cardInfo = BuildCardInfo(card);
             cardInfo["index"] = index;
             cardInfo["description"] = SafeGetCardDescription(card); // hand cards use default pile
+            AddHandSelectCardIds(cardInfo, card, handCards);
             selectableCards.Add(cardInfo);
             index++;
         }
         state["cards"] = selectableCards;
 
-        // Already-selected cards (in the SelectedHandCardContainer)
+        // Already-selected cards. Prefer the game's own _selectedCards list (also covers the upgrade
+        // preview slot); fall back to the SelectedHandCardContainer holders.
         var selectedContainer = hand.GetNodeOrNull<Godot.Control>("%SelectedHandCardContainer");
-        if (selectedContainer != null)
+        if (selectedModels != null)
+        {
+            var selectedCards = new List<Dictionary<string, object?>>();
+            int selIdx = 0;
+            foreach (var card in selectedModels)
+            {
+                if (card == null) continue;
+                var entry = new Dictionary<string, object?>
+                {
+                    ["index"] = selIdx,
+                    ["name"] = SafeGetText(() => card.Title)
+                };
+                AddHandSelectCardIds(entry, card, handCards);
+                selectedCards.Add(entry);
+                selIdx++;
+            }
+            if (selectedCards.Count > 0)
+                state["selected_cards"] = selectedCards;
+        }
+        else if (selectedContainer != null)
         {
             var selectedCards = new List<Dictionary<string, object?>>();
             var selectedHolders = FindAll<NSelectedHandCardHolder>(selectedContainer);
@@ -2149,11 +2397,13 @@ public static partial class McpMod
             {
                 var card = holder.CardModel;
                 if (card == null) continue;
-                selectedCards.Add(new Dictionary<string, object?>
+                var entry = new Dictionary<string, object?>
                 {
                     ["index"] = selIdx,
                     ["name"] = SafeGetText(() => card.Title)
-                });
+                };
+                AddHandSelectCardIds(entry, card, handCards);
+                selectedCards.Add(entry);
                 selIdx++;
             }
             if (selectedCards.Count > 0)
@@ -2165,6 +2415,24 @@ public static partial class McpMod
         state["can_confirm"] = confirmBtn?.IsEnabled ?? false;
 
         return state;
+    }
+
+    /// <summary>
+    /// Stable identifiers for a card in an in-combat hand selection: `card_uid` (per-instance combat
+    /// card id from NetCombatCardDb, unique even for identical duplicates) and `hand_index` (position
+    /// in the hand pile, which keeps selected cards until the selection resolves = player.hand index).
+    /// </summary>
+    private static void AddHandSelectCardIds(Dictionary<string, object?> entry, CardModel card, List<CardModel> handCards)
+    {
+        if (!entry.ContainsKey("id")) entry["id"] = card.Id.Entry;
+        try
+        {
+            if (MegaCrit.Sts2.Core.GameActions.Multiplayer.NetCombatCardDb.Instance.TryGetCardId(card, out var uid))
+                entry["card_uid"] = uid;
+        }
+        catch { }
+        int handIndex = handCards.FindIndex(c => ReferenceEquals(c, card));
+        entry["hand_index"] = handIndex >= 0 ? handIndex : (int?)null;
     }
 
     private static Dictionary<string, object?> BuildRelicSelectState(NChooseARelicSelection screen, RunState runState)
@@ -2400,6 +2668,7 @@ public static partial class McpMod
                     ["id"] = power.Id.Entry,
                     ["name"] = SafeGetText(() => power.Title),
                     ["amount"] = power.DisplayAmount,
+                    ["raw_amount"] = power.Amount, // sts2-cli's power `amount`
                     ["type"] = power.Type.ToString(),
                     ["description"] = resolvedDesc,
                     ["keywords"] = BuildHoverTips(extraTips)
